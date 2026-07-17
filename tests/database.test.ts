@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import { beforeEach, describe, expect, it } from "vitest";
-import { db, exportBackup, exportTransactionsCsv, initializeDatabase, loadSnapshot, resetDatabase } from "../lib/db";
+import { db, exportBackup, exportTransactionsCsv, initializeDatabase, listLegacyCustomizations, loadSnapshot, queueLocalChange, resetDatabase } from "../lib/db";
 
 describe("IndexedDB 持久化与备份", () => {
   beforeEach(async () => { await db.delete(); await db.open(); });
@@ -15,4 +15,25 @@ describe("IndexedDB 持久化与备份", () => {
     expect(exportTransactionsCsv(snapshot.transactions, snapshot.accounts, snapshot.categories)).toContain("\"日期\",\"时间\"");
   });
   it("清空后可恢复示例数据", async () => { await initializeDatabase(); await db.transactions.clear(); await resetDatabase(); expect((await loadSnapshot()).transactions).toHaveLength(1); });
+  it("本地修改和删除会写入可重试的增量同步队列", async () => {
+    await initializeDatabase();
+    await db.accounts.update("acc-lqt", { openingBalanceCents: 135305 });
+    await queueLocalChange("accounts", "acc-lqt");
+    const put = await db.syncQueue.get("accounts:acc-lqt");
+    expect(put?.operation).toBe("put");
+    await db.transactions.delete("tx-ps-history");
+    await queueLocalChange("transactions", "tx-ps-history", "delete");
+    expect((await db.syncQueue.get("transactions:tx-ps-history"))?.operation).toBe("delete");
+  });
+  it("v2 数据库包含同步队列与版本元数据表", async () => {
+    await initializeDatabase();
+    expect(db.tables.map((table) => table.name)).toEqual(expect.arrayContaining(["syncQueue", "syncMeta"]));
+    expect(db.verno).toBe(2);
+  });
+  it("升级迁移能识别旧设备上改过的同 ID 数据，避免被另一设备覆盖", async () => {
+    await initializeDatabase();
+    await db.accounts.update("acc-lqt", { openingBalanceCents: 135305 });
+    const changes = await listLegacyCustomizations();
+    expect(changes).toContainEqual(expect.objectContaining({ entityType: "accounts", recordId: "acc-lqt", operation: "put" }));
+  });
 });

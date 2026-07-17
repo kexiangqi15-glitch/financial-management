@@ -131,6 +131,35 @@ export interface AttachmentRecord {
   blob: Blob;
 }
 
+export type SyncEntity =
+  | "accounts"
+  | "categories"
+  | "transactions"
+  | "salaryPlans"
+  | "attendance"
+  | "installmentPlans"
+  | "installmentItems"
+  | "reserves"
+  | "budgets"
+  | "settings"
+  | "attachments";
+
+export interface SyncQueueItem {
+  id: string;
+  entityType: SyncEntity;
+  recordId: string;
+  operation: "put" | "delete";
+  localUpdatedAt: number;
+  deviceId: string;
+  attempts: number;
+  lastError?: string;
+}
+
+export interface SyncMetaRecord {
+  key: string;
+  value: unknown;
+}
+
 export interface LedgerSnapshot {
   accounts: Account[];
   categories: Category[];
@@ -149,4 +178,3 @@ export const uid = (prefix: string) =>
 export const asCents = (yuan: number): Cents => Math.round(yuan * 100);
 export const formatMoney = (value: Cents) =>
   new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY" }).format(value / 100);
-

@@ -1,20 +1,63 @@
 # 青蓝账本
 
-青蓝账本是一个本地优先、可离线、支持 Google 登录与 Firestore 跨设备实时同步的中文个人现金流 PWA。Windows、Android、iPhone、Mac 和 iPad 登录同一 Google 账号后，共享同一份账本；IndexedDB 始终保留为本地缓存和离线数据库。
+青蓝账本是一款本地优先、可离线、支持跨设备自动同步的中文个人现金流 PWA。账目始终先写入浏览器 IndexedDB；生产站点使用统一账号识别用户，以 Cloudflare D1 保存结构化记录、R2 保存图片凭证。
 
-## 技术选择
+## 这次同步方案
 
-本项目采用 Firebase Authentication + Cloud Firestore：
+当前生产方案不再依赖 Firebase CLI、Google OAuth 回调或本机 `localhost` 授权：
 
-| 方案 | 实时/离线 | Google 登录 | 运维 | 免费额度与结论 |
-| --- | --- | --- | --- | --- |
-| Firebase | 原生实时监听、Web 离线缓存 | 原生 | 最低 | 个人账本首选；免费层足够日常增量同步 |
-| Supabase | 实时能力良好，离线需自建 | 可用 | 较低 | SQL/共享账本很强，但本地冲突层工作更多 |
-| Appwrite | 可用 | 可用 | 云版或自托管 | 维护与生态成本更高 |
-| Cloudflare D1 | 无原生客户端实时监听 | 需另配认证 | 低 | 很适合 API/统计，不适合本需求的实时离线同步 |
-| PocketBase | 实时可用 | 需配置 | 必须维护单机服务 | 不符合“零服务器维护”目标 |
+- 身份：ChatGPT Sites 统一账号，Worker 只信任平台注入的 `oai-authenticated-user-email`。
+- 结构化数据：Cloudflare D1。
+- 图片凭证：Cloudflare R2，单张不超过 5 MB。
+- 本机缓存：Dexie + IndexedDB，断网时照常记账。
+- 自动同步：本机每次新增、修改或删除都会立即触发增量上传；页面可见时每 5 秒增量拉取一次，并在联网、切回页面和窗口聚焦时立即补同步。
+- 手动同步：顶部云图标和“设置 → 账号与云同步 → 立即同步”。
 
-注意：Firebase 在中国大陆网络下的连通性可能受运营商和网络环境影响。应用会继续写入 IndexedDB 并显示“离线/待同步”，恢复可访问网络后自动补传，不会因云端暂时不可用阻塞记账。
+生产站点地址：<https://qinglan-ledger.kexiangqi15.chatgpt.site>
+
+## 同步与冲突规则
+
+每条数据独立保存 `entityType + recordId + clock + deviceId`：
+
+1. 业务操作先落 IndexedDB，并写入可重试的 `syncQueue`。
+2. 联网后仅上传队列中的变化，不全量覆盖云端。
+3. 客户端使用 D1 `serverVersion` 游标，仅拉取上次同步后的变化。
+4. 手机和电脑同时修改同一记录时，按 `clock` 执行 Last Write Wins；同一毫秒再用 `deviceId` 稳定打破平局。
+5. 被覆盖版本和冲突失败版本写入 `sync_history`；删除保存为墓碑，避免另一台设备把旧数据“复活”。
+6. 所有金额仍使用整数分，统计结果由本地纯函数从事实数据重新计算，不单独同步重复统计值。
+
+### 首次升级迁移
+
+升级后的第一次成功联网会自动检查旧 IndexedDB：
+
+- 云端为空：把本机全部数据排入上传队列。
+- 另一台设备已先创建云账本：先拉取云端，再把本机相对示例数据的真实修改重新排入队列。
+- 同 ID 的旧余额修改也会被识别。例如电脑把默认 ¥1,358.55 改成 ¥1,353.05，即使手机先上传了默认值，电脑的真实修改仍会进入云端竞争并同步回手机。
+- 迁移完成后不删除 IndexedDB，本机缓存和 JSON 备份能力保持不变。
+
+## D1 数据结构
+
+迁移文件位于 `drizzle/0000_d1_cloud_sync.sql`，核心表如下：
+
+| 表 | 用途 |
+| --- | --- |
+| `sync_users` | 统一账号资料与最后访问时间 |
+| `sync_devices` | 设备 ID、客户端信息和最后在线时间 |
+| `sync_sequence` | 分配单调递增的云端版本号 |
+| `sync_records` | 当前版本、墓碑和增量游标 |
+| `sync_history` | 被覆盖版本与冲突历史 |
+
+`sync_records` 以 `(owner_key, entity_type, record_id)` 为主键，并为 `(owner_key, server_version)` 建索引。`owner_key` 是服务端根据规范化邮箱计算的 SHA-256，不由浏览器提交。未来扩展家庭账本时可把所有权层替换为独立 `ledger_id` 和成员表。
+
+同步实体包括账户、分类、流水、工资计划、考勤、分期计划/期次、资金预留、预算、设置、主题和附件。工资应收、安全线、周预算、统计和现金流预测从这些事实数据实时派生，因此各设备结果一致。
+
+## 安全
+
+- API 每次请求都在 Worker 内读取平台提供的已认证邮箱；浏览器无法指定别人的用户 ID。
+- 所有 D1 查询和 R2 路径都带服务端生成的 `owner_key`。
+- `/api/sync`、账号资料和附件响应均使用 `no-store`，Service Worker 明确不缓存 `/api/`。
+- 前端没有数据库密钥、服务账号私钥或 OAuth Client Secret。
+- 站点访问策略仍由 Sites 控制；当前个人账本应保持仅本人可访问。
 
 ## 本地运行
 
@@ -22,76 +65,12 @@
 
 ```bash
 npm install
-copy .env.example .env.local
 npm run dev
 ```
 
-未配置 Firebase 时应用会进入“本地安全模式”，原有账本可继续使用，但不会宣称已云同步。
+纯本地 Vite 环境没有 Sites 注入的统一账号头和生产 D1/R2 绑定，因此会以 IndexedDB 本地安全模式运行。完整跨设备同步应在 Sites 生产站点验证。
 
-## Firebase 配置
-
-1. 在 [Firebase Console](https://console.firebase.google.com/) 创建项目，不启用 Analytics 也可以。
-2. 添加一个 Web 应用，复制 Web 配置到 `.env.local` 对应的 `VITE_FIREBASE_*` 字段。
-3. Authentication → Sign-in method → 启用 Google。
-4. Authentication → Settings → Authorized domains，加入所有实际部署域名，例如：
-   - `qinglan-ledger.kexiangqi15.chatgpt.site`
-   - Vercel / Netlify / GitHub Pages 的正式域名
-5. Firestore Database → Create database，选择离主要使用地点较近的区域。
-6. 安装并登录 Firebase CLI 后部署安全规则与索引：
-
-```bash
-npx firebase-tools login
-npx firebase-tools use YOUR_PROJECT_ID
-npx firebase-tools deploy --only firestore:rules,firestore:indexes
-```
-
-也可以在不重新构建的情况下替换部署产物中的 `firebase-config.js`：
-
-```js
-window.__QINGLAN_FIREBASE_CONFIG__ = {
-  apiKey: "...",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  projectId: "YOUR_PROJECT",
-  storageBucket: "YOUR_PROJECT.firebasestorage.app",
-  messagingSenderId: "...",
-  appId: "..."
-};
-```
-
-Firebase Web API Key 是项目标识，不是管理员密钥；真正的数据隔离由 `firestore.rules` 中的 `request.auth.uid` 强制执行。不要在前端放置服务账号私钥。
-
-## 同步行为
-
-- 启动：先拉取云端记录，再合并本机待同步变更。
-- 新增、修改、删除：业务写入先落 IndexedDB，再写入逐记录增量队列。
-- 离线：完整保留本地写入；`online` 事件触发后自动重试。
-- 多设备：Firestore `onSnapshot` 实时监听远端变化。
-- 冲突：按 `clock + deviceId` 做确定性的 Last Write Wins。
-- 历史：覆盖前的版本写入当前记录的 `history` 子集合；删除采用墓碑记录，不做无审计的硬删除。
-- 图片：Blob 仍保存在 IndexedDB；云端以约 600 KB 的 Firestore 分块保存，5 MB 凭证不会超过单文档大小限制。
-- 手动同步：顶部云图标和“设置 → 账号与云同步 → 立即同步”。
-
-首次升级会识别旧 IndexedDB 数据。即使另一台设备先创建了云账本，本机与示例值不同的账户余额、考勤、预算、交易和附件也会作为旧设备自定义数据重新进入队列，避免同 ID 数据被默认样例覆盖。迁移成功后本地缓存不会删除。
-
-## Firestore 结构
-
-```text
-users/{uid}                               用户资料与 schemaVersion
-users/{uid}/devices/{deviceId}            设备最近在线信息
-users/{uid}/records/{entity--encodedId}   统一增量记录/墓碑
-  └─ history/{clock-deviceId}             冲突和覆盖前版本
-users/{uid}/attachmentChunks/{chunkId}    版本化附件分块
-```
-
-`records` 文档包含 `entityType`、`recordId`、`data`、`deleted`、`clock`、`deviceId`、`schemaVersion` 和服务端 `updatedAt`。统一记录流只需一个实时监听，未来可平滑扩展到 `ledgers/{ledgerId}/records` 与成员权限，实现家庭/共享账本。`firestore.indexes.json` 已包含实体时间和交易日期查询索引。
-
-同步实体包括账户、分类、流水、工资计划、考勤、分期计划/期次、资金预留、预算、设置、主题和附件。统计、应收工资、安全线、未来余额与现金流预测是纯函数派生结果；同步底层事实数据后，每台设备会得到完全相同的派生结果，避免保存重复统计造成漂移。
-
-## 安全规则
-
-`firestore.rules` 只允许已登录且 `request.auth.uid == userId` 的用户读写 `users/{userId}` 及其所有子集合。任何用户都无法查询或修改其他 UID 下的数据。规则必须部署到实际 Firebase 项目后才生效。
-
-## 部署
+## 测试与构建
 
 ```bash
 npm run typecheck
@@ -99,26 +78,35 @@ npm run test
 npm run build
 ```
 
-- Firebase Hosting：`firebase.json` 已指向 `dist/client` 并配置 SPA rewrite。
-- Vercel / Netlify / GitHub Pages：构建目录使用 `dist/client`，并将所有路由回退到 `index.html`。
-- ChatGPT Sites：保留 `.openai/hosting.json` 与 Cloudflare Worker 静态入口；Firebase 仅作为客户端认证/数据服务。
+测试覆盖财务计算、历史 PS 快照、工资与预算边界、IndexedDB 初始化和备份、同步队列、LWW 冲突，以及“手机默认数据不能覆盖电脑旧修改”的升级场景。
 
-部署后若手机仍显示旧页面，完全关闭旧 PWA/Safari 标签再重新打开；Service Worker v2 会删除旧缓存。顶部必须出现云同步状态或未配置提示，不能再显示“数据仅存本机”。
+## 部署
 
-## 数据与备份
+`.openai/hosting.json` 已声明：
 
-Dexie v2 表包括全部业务表，以及：
+```json
+{
+  "project_id": "appgprj_6a58fd61622c8191a5a72d354ac910fd",
+  "d1": "DB",
+  "r2": "ATTACHMENTS"
+}
+```
 
-- `syncQueue`：逐记录待发送变更、重试次数和错误。
-- `syncMeta`：设备迁移标记、每条记录的 LWW 版本戳和最后同步时间。
+构建会把配置与 `drizzle/` 迁移复制到 `dist/.openai/`。发布新版本时，Sites 为 Worker 绑定 D1/R2 并应用迁移。此同步实现依赖 Sites 的服务端身份头；若改部署到纯静态 GitHub Pages、Netlify 或 Vercel 静态托管，页面仍可离线使用，但必须另行提供兼容的身份代理和 `/api/sync` Worker 才能保留云同步，不能直接把身份头放到客户端伪造。
 
-JSON 备份仍包含所有业务数据和附件；CSV 只导出流水字段。云同步不是备份历史的替代品，建议继续定期导出 JSON。
+## 数据备份
+
+- JSON：导出全部业务数据和图片凭证，可合并或覆盖导入。
+- CSV：导出交易明细，不嵌入二进制附件。
+- 云同步不是永久备份历史的替代品，建议定期导出 JSON。
 
 ## 目录
 
-- `app/CloudSyncProvider.tsx`：登录门、账号状态和同步 UI。
-- `lib/sync/engine.ts`：Firestore 实时、增量、离线恢复、迁移、附件和历史版本。
-- `lib/sync/core.ts`：LWW、文档 ID、数据清洗和分块纯函数。
-- `lib/db.ts`：Dexie v2、本地队列和旧数据识别。
-- `firestore.rules` / `firestore.indexes.json`：生产安全与索引。
-- `tests/`：财务算法、IndexedDB、迁移队列和冲突测试。
+- `app/LedgerApp.tsx`：主要页面与业务交互。
+- `app/CloudSyncProvider.tsx`：统一账号、同步状态和手动同步 UI。
+- `lib/db.ts`：Dexie 数据库、增量队列与旧数据识别。
+- `lib/sync/engine.ts`：D1 增量同步、轮询、离线恢复、迁移和附件下载。
+- `lib/sync/core.ts`：LWW 与云数据序列化纯函数。
+- `worker/index.ts`：身份隔离、D1 API、R2 附件和冲突历史。
+- `db/schema.ts` / `drizzle/`：云数据库模型与迁移。
+- `tests/`：财务、IndexedDB 和跨设备同步测试。

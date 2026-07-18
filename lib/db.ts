@@ -119,7 +119,11 @@ export function nextSyncClock() {
 
 export async function queueLocalChange(entityType: SyncEntity, recordId: string, operation: "put" | "delete" = "put") {
   if (entityType === "settings" && recordId === "initialized") return;
-  const localUpdatedAt = nextSyncClock();
+  await queueLocalChangeAt(entityType, recordId, operation, nextSyncClock());
+}
+
+async function queueLocalChangeAt(entityType: SyncEntity, recordId: string, operation: "put" | "delete", localUpdatedAt: number) {
+  if (entityType === "settings" && recordId === "initialized") return;
   const deviceId = getDeviceId();
   const item: SyncQueueItem = { id: `${entityType}:${recordId}`, entityType, recordId, operation, localUpdatedAt, deviceId, attempts: 0 };
   await db.transaction("rw", [db.syncQueue, db.syncMeta], async () => {
@@ -175,6 +179,17 @@ export async function queueAllLocalData(filter?: Set<string>) {
     const compound = `${identity.entityType}:${identity.recordId}`;
     if (!filter || filter.has(compound)) await queueLocalChange(identity.entityType, identity.recordId, "put");
   }
+  return identities.length;
+}
+
+/**
+ * A pristine example database uses a deliberately old clock. This prevents a
+ * newly opened phone containing only defaults from beating a real edit that a
+ * desktop is migrating at the same time while the cloud is still empty.
+ */
+export async function queuePristineSeedData() {
+  const identities = await listAllRecordIdentities();
+  for (const identity of identities) await queueLocalChangeAt(identity.entityType, identity.recordId, "put", 1);
   return identities.length;
 }
 

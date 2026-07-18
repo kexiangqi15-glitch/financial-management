@@ -11,6 +11,7 @@ export interface CloudEnvelope extends VersionStamp {
   data: unknown | null;
   deleted: boolean;
   schemaVersion: 2;
+  serverVersion?: number;
   updatedAt?: unknown;
 }
 
@@ -26,7 +27,17 @@ export function remoteShouldApply(remote: VersionStamp, local?: VersionStamp) {
   return compareVersion(remote, local) >= 0;
 }
 
-export function recordDocumentId(entityType: SyncEntity, recordId: string) {
+export function resolveCloudConflict<T extends VersionStamp>(candidate: T, current?: T) {
+  if (!current) return { accepted: true, winner: candidate, history: undefined } as const;
+  const accepted = compareVersion(candidate, current) > 0;
+  return {
+    accepted,
+    winner: accepted ? candidate : current,
+    history: accepted ? current : candidate,
+  } as const;
+}
+
+export function cloudRecordKey(entityType: SyncEntity, recordId: string) {
   const bytes = new TextEncoder().encode(recordId);
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -34,20 +45,13 @@ export function recordDocumentId(entityType: SyncEntity, recordId: string) {
   return `${entityType}--${encoded}`;
 }
 
-export function splitBase64(value: string, size = 600_000) {
-  if (!Number.isInteger(size) || size <= 0) throw new Error("分块大小必须为正整数");
-  const chunks: string[] = [];
-  for (let offset = 0; offset < value.length; offset += size) chunks.push(value.slice(offset, offset + size));
-  return chunks;
-}
-
-export function sanitizeForFirestore(value: unknown): unknown {
+export function sanitizeForCloud(value: unknown): unknown {
   if (value === undefined) return null;
   if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
-  if (Array.isArray(value)) return value.map(sanitizeForFirestore);
+  if (Array.isArray(value)) return value.map(sanitizeForCloud);
   if (typeof value === "object") {
     const result: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(value)) if (child !== undefined) result[key] = sanitizeForFirestore(child);
+    for (const [key, child] of Object.entries(value)) if (child !== undefined) result[key] = sanitizeForCloud(child);
     return result;
   }
   return String(value);

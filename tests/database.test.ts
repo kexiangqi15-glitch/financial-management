@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import { beforeEach, describe, expect, it } from "vitest";
-import { db, exportBackup, exportTransactionsCsv, initializeDatabase, listLegacyCustomizations, loadSnapshot, queueLocalChange, resetDatabase } from "../lib/db";
+import { db, exportBackup, exportTransactionsCsv, initializeDatabase, listLegacyCustomizations, loadSnapshot, queueLocalChange, queuePristineSeedData, resetDatabase } from "../lib/db";
 
 describe("IndexedDB 持久化与备份", () => {
   beforeEach(async () => { await db.delete(); await db.open(); });
@@ -35,5 +35,10 @@ describe("IndexedDB 持久化与备份", () => {
     await db.accounts.update("acc-lqt", { openingBalanceCents: 135305 });
     const changes = await listLegacyCustomizations();
     expect(changes).toContainEqual(expect.objectContaining({ entityType: "accounts", recordId: "acc-lqt", operation: "put" }));
+  });
+  it("纯示例数据首次上传使用低优先级时钟，不会压过同时迁移的真实修改", async () => {
+    await initializeDatabase();
+    await queuePristineSeedData();
+    expect((await db.syncQueue.get("accounts:acc-lqt"))?.localUpdatedAt).toBe(1);
   });
 });

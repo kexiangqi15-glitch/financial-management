@@ -18,6 +18,6 @@
     "baseUrl": ".",
     "paths": { "@/*": ["./*"] }
   },
-  "include": ["src", "app", "lib", "tests", "vite.config.ts"],
+  "include": ["src", "app", "lib", "db", "worker", "tests", "vite.config.ts"],
   "exclude": ["node_modules", "dist"]
 }

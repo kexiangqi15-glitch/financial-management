@@ -29,6 +29,39 @@ export const addDays = (date: LocalDate, days: number) => {
 export const daysBetween = (from: LocalDate, to: LocalDate) =>
   Math.max(0, Math.ceil((parseLocalDate(to).getTime() - parseLocalDate(from).getTime()) / DAY));
 
+export function dailyConsumptionTrend(
+  transactions: LedgerTransaction[],
+  asOf: LocalDate,
+  days = 30,
+) {
+  const periodDays = Math.max(1, Math.floor(days));
+  const start = addDays(asOf, -(periodDays - 1));
+  const totals = new Map<LocalDate, Cents>();
+  for (let offset = 0; offset < periodDays; offset += 1) {
+    totals.set(addDays(start, offset), 0);
+  }
+
+  for (const transaction of transactions) {
+    if (
+      transaction.status !== "posted"
+      || !transaction.affectsBalance
+      || transaction.date < start
+      || transaction.date > asOf
+    ) continue;
+
+    if (transaction.type === "expense" || transaction.type === "installment_payment") {
+      totals.set(transaction.date, (totals.get(transaction.date) ?? 0) + transaction.amountCents);
+    } else if (transaction.type === "refund") {
+      totals.set(transaction.date, (totals.get(transaction.date) ?? 0) - transaction.amountCents);
+    }
+  }
+
+  return [...totals].map(([date, amountCents]) => ({
+    date,
+    amountCents: Math.max(0, amountCents),
+  }));
+}
+
 export function calculateAccountBalances(accounts: Account[], transactions: LedgerTransaction[]) {
   const balances = Object.fromEntries(accounts.map((a) => [a.id, a.openingBalanceCents])) as Record<string, Cents>;
   for (const tx of transactions) {
@@ -177,4 +210,3 @@ export function simulatePurchase(amountCents: Cents, availableCents: Cents, safe
     recommended: safetyGapCents === 0 && afterWeeklyCents >= 0 && installmentCovered,
   };
 }
-

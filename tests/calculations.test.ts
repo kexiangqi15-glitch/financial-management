@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   calculateAccountBalances, calculateSafetyLine, calculateSalarySnapshot, calculateWeeklyBudget, expectedPayDate,
-  forecastCashflow, simulatePurchase, summarizeInstallments,
+  dailyConsumptionTrend, forecastCashflow, simulatePurchase, summarizeInstallments,
 } from "../lib/calculations";
 import type { Account, Attendance, BudgetSettings, InstallmentItem, LedgerTransaction, SalaryPlan } from "../lib/types";
 
@@ -23,6 +23,20 @@ describe("账户与交易", () => {
     expect(balances.a).toBe(115855); expect(balances.b).toBe(20000); expect(balances.a + balances.b).toBe(135855);
   });
   it("退款返还账户余额", () => expect(calculateAccountBalances([account], [baseTx({ type: "refund", amountCents: 2000 })]).a).toBe(137855));
+  it("近30天每日消费跨月补零、排除转账并冲减退款", () => {
+    const trend = dailyConsumptionTrend([
+      baseTx({ id: "old", date: "2026-06-30", amountCents: 9999 }),
+      baseTx({ id: "expense", date: "2026-07-01", amountCents: 5000 }),
+      baseTx({ id: "refund", type: "refund", date: "2026-07-01", amountCents: 1200 }),
+      baseTx({ id: "transfer", type: "transfer", date: "2026-07-02", amountCents: 3000 }),
+      baseTx({ id: "installment", type: "installment_payment", date: "2026-07-30", amountCents: 35800 }),
+      baseTx({ id: "void", status: "void", date: "2026-07-30", amountCents: 10000 }),
+    ], "2026-07-30", 30);
+    expect(trend).toHaveLength(30);
+    expect(trend[0]).toEqual({ date: "2026-07-01", amountCents: 3800 });
+    expect(trend[1]).toEqual({ date: "2026-07-02", amountCents: 0 });
+    expect(trend[29]).toEqual({ date: "2026-07-30", amountCents: 35800 });
+  });
 });
 
 describe("工资与应收", () => {

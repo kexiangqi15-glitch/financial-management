@@ -2,6 +2,7 @@ import type {
   Account,
   Attendance,
   BudgetSettings,
+  Category,
   Cents,
   InstallmentItem,
   LedgerTransaction,
@@ -60,6 +61,76 @@ export function dailyConsumptionTrend(
     date,
     amountCents: Math.max(0, amountCents),
   }));
+}
+
+export function monthlyCategorySpendingTrend(
+  transactions: LedgerTransaction[],
+  categories: Category[],
+  asOf: LocalDate,
+) {
+  const [year, month] = asOf.split("-").map(Number);
+  const monthPrefix = asOf.slice(0, 7);
+  const dayCount = new Date(year, month, 0, 12).getDate();
+  const categoryById = new Map(categories.map((category) => [category.id, category]));
+  const transactionById = new Map(transactions.map((transaction) => [transaction.id, transaction]));
+  const amounts = new Map<LocalDate, Map<string, Cents>>();
+  const totals = new Map<string, Cents>();
+
+  for (let day = 1; day <= dayCount; day += 1) {
+    const date = `${monthPrefix}-${String(day).padStart(2, "0")}` as LocalDate;
+    amounts.set(date, new Map());
+  }
+
+  for (const transaction of transactions) {
+    if (
+      transaction.status !== "posted"
+      || !transaction.affectsBalance
+      || !transaction.date.startsWith(monthPrefix)
+    ) continue;
+
+    let categoryId = transaction.categoryId;
+    let direction = 0;
+    if (transaction.type === "expense" || transaction.type === "installment_payment") direction = 1;
+    if (transaction.type === "refund") {
+      direction = -1;
+      const original = transaction.linkedId ? transactionById.get(transaction.linkedId) : undefined;
+      categoryId = original?.categoryId ?? categoryId;
+    }
+    if (!direction || !categoryId || categoryById.get(categoryId)?.kind !== "expense") continue;
+
+    const dayAmounts = amounts.get(transaction.date);
+    if (!dayAmounts) continue;
+    dayAmounts.set(
+      categoryId,
+      (dayAmounts.get(categoryId) ?? 0) + direction * transaction.amountCents,
+    );
+  }
+
+  for (const dayAmounts of amounts.values()) {
+    for (const [categoryId, amountCents] of dayAmounts) {
+      totals.set(categoryId, (totals.get(categoryId) ?? 0) + Math.max(0, amountCents));
+    }
+  }
+
+  const series = [...totals]
+    .filter(([, totalCents]) => totalCents > 0)
+    .map(([id, totalCents]) => ({
+      id,
+      name: categoryById.get(id)?.name ?? "其他",
+      totalCents,
+    }))
+    .sort((left, right) => right.totalCents - left.totalCents || left.name.localeCompare(right.name, "zh-CN"));
+
+  return {
+    month: monthPrefix,
+    series,
+    days: [...amounts].map(([date, dayAmounts]) => ({
+      date,
+      amounts: Object.fromEntries(
+        series.map(({ id }) => [id, Math.max(0, dayAmounts.get(id) ?? 0)]),
+      ) as Record<string, Cents>,
+    })),
+  };
 }
 
 export function calculateAccountBalances(accounts: Account[], transactions: LedgerTransaction[]) {

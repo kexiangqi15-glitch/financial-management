@@ -12,7 +12,7 @@ import {
 import { db, exportBackup, exportTransactionsCsv, importBackup, initializeDatabase, loadSnapshot, queueLocalChange, resetDatabase } from "@/lib/db";
 import {
   calculateAccountBalances, calculateSafetyLine, calculateSalarySnapshot, calculateWeeklyBudget, currentAvailable,
-  dailyConsumptionTrend, forecastCashflow, salaryExpectedPayments, simulatePurchase, summarizeInstallments, toLocalDate, weeklySpent,
+  dailyConsumptionTrend, forecastCashflow, monthlyCategorySpendingTrend, salaryExpectedPayments, simulatePurchase, summarizeInstallments, toLocalDate, weeklySpent,
 } from "@/lib/calculations";
 import type { Cents, LedgerSnapshot, LedgerTransaction, LocalDate, TransactionType } from "@/lib/types";
 import { asCents, formatMoney, uid } from "@/lib/types";
@@ -24,7 +24,7 @@ const typeLabels: Record<TransactionType, string> = {
   expense: "支出", income: "收入", transfer: "转账", refund: "退款", loan_out: "借出", loan_repayment: "收回",
   salary_payment: "工资到账", installment_payment: "分期付款", adjustment: "余额调整",
 };
-const palette = ["#22a6b3", "#3b82f6", "#6d8dff", "#63c5a6", "#f2a65a", "#9c86d7"];
+const palette = ["#22c7c9", "#3b82f6", "#8b7cf6", "#55c995", "#f2a65a", "#ef6f8f", "#49a6dd", "#b385d8", "#e3c34f", "#5cc0a7", "#f07f58", "#7799e8"];
 
 function downloadText(name: string, text: string, type: string) {
   const url = URL.createObjectURL(new Blob([text], { type }));
@@ -116,8 +116,35 @@ function Sidebar({ view, navigate }: { view: View; navigate: (view: View) => voi
   return <aside className="sidebar"><div className="brand"><div className="brand-mark">青</div><div><strong>青蓝账本</strong><small>放心花每一笔钱</small></div></div><nav>{navItems.map(({ id, label, icon: Icon }) => <button key={id} className={view === id ? "active" : ""} onClick={() => navigate(id)}><Icon />{label}</button>)}</nav><div className="privacy"><ShieldCheck /><div><strong>{configured ? "本地优先云同步" : "本地安全模式"}</strong><span>{configured ? "IndexedDB · D1 · 可离线" : "账目已安全保存在本机"}</span></div></div></aside>;
 }
 function MobileNav({ view, navigate }: { view: View; navigate: (view: View) => void }) {
-  const items: { id: View; label: string; icon: typeof Home }[] = [{ id: "home", label: "首页", icon: Home }, { id: "transactions", label: "账单", icon: ReceiptText }, { id: "add", label: "记一笔", icon: Plus }, { id: "budget", label: "预算", icon: ShieldCheck }, { id: "settings", label: "我的", icon: MoreHorizontal }];
-  return <nav className="mobile-nav">{items.map(({ id, label, icon: Icon }) => <button key={id} className={`${view === id ? "active" : ""} ${id === "add" ? "add" : ""}`} onClick={() => navigate(id)}><Icon /><span>{label}</span></button>)}</nav>;
+  const [moreOpen, setMoreOpen] = useState(false);
+  const primaryItems: { id: View; label: string; icon: typeof Home }[] = [{ id: "home", label: "首页", icon: Home }, { id: "transactions", label: "账单", icon: ReceiptText }, { id: "add", label: "记一笔", icon: Plus }, { id: "budget", label: "预算", icon: ShieldCheck }];
+  const moreItems = [
+    { id: "salary" as View, label: "工资与应收", icon: BriefcaseBusiness },
+    { id: "installments" as View, label: "分期管理", icon: CalendarDays },
+    { id: "calendar" as View, label: "现金流日历", icon: CalendarDays },
+    { id: "analytics" as View, label: "统计分析", icon: BarChart3 },
+    { id: "accounts" as View, label: "账户管理", icon: Landmark },
+    { id: "settings" as View, label: "设置与备份", icon: Settings },
+  ];
+  const moreActive = moreItems.some((item) => item.id === view);
+  useEffect(() => {
+    if (!moreOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setMoreOpen(false); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [moreOpen]);
+  const openView = (next: View) => { setMoreOpen(false); navigate(next); };
+  return <>
+    {moreOpen && <button className="mobile-more-backdrop" aria-label="关闭更多页面菜单" onClick={() => setMoreOpen(false)} />}
+    {moreOpen && <section className="mobile-more-sheet" role="dialog" aria-modal="true" aria-label="更多页面">
+      <div className="mobile-more-head"><div><strong>全部功能</strong><span>选择要打开的页面</span></div><button aria-label="关闭更多页面菜单" onClick={() => setMoreOpen(false)}><X /></button></div>
+      <div className="mobile-more-grid">{moreItems.map(({ id, label, icon: Icon }) => <button key={id} className={view === id ? "active" : ""} onClick={() => openView(id)}><Icon /><span>{label}</span><ChevronRight /></button>)}</div>
+    </section>}
+    <nav className="mobile-nav" aria-label="手机端主导航">
+      {primaryItems.map(({ id, label, icon: Icon }) => <button key={id} className={`${view === id ? "active" : ""} ${id === "add" ? "add" : ""}`} onClick={() => openView(id)}><Icon /><span>{label}</span></button>)}
+      <button className={moreActive || moreOpen ? "active" : ""} aria-expanded={moreOpen} onClick={() => setMoreOpen((open) => !open)}><MoreHorizontal /><span>更多</span></button>
+    </nav>
+  </>;
 }
 
 function Dashboard({ data, metrics: m, navigate }: { data: LedgerSnapshot; metrics: ReturnType<typeof deriveMetrics>; navigate: (v: View) => void }) {
@@ -223,13 +250,20 @@ function CalendarView({ data, metrics: m }: { data: LedgerSnapshot; metrics: Ret
 }
 
 function AnalyticsView({ data }: { data: LedgerSnapshot }) {
-  const posted = data.transactions.filter((t) => t.status === "posted" && t.affectsBalance && t.type !== "transfer");
-  const expense = posted.filter((t) => ["expense", "installment_payment", "loan_out"].includes(t.type)).reduce((s, t) => s + t.amountCents, 0);
-  const income = posted.filter((t) => ["income", "salary_payment", "loan_repayment"].includes(t.type)).reduce((s, t) => s + t.amountCents, 0);
-  const byCategory = new Map<string, number>(); posted.filter((t) => t.type === "expense").forEach((t) => { const name = data.categories.find((c) => c.id === t.categoryId)?.name ?? "其他"; byCategory.set(name, (byCategory.get(name) ?? 0) + t.amountCents / 100); });
-  const pie = [...byCategory].map(([name, value]) => ({ name, value })); const trend = ["第1周", "第2周", "第3周", "第4周"].map((name, index) => ({ name, 支出: index === 2 ? expense / 100 : 0, 预算: data.budget.weeklyCapCents / 100 }));
+  const monthPrefix = TODAY.slice(0, 7);
+  const posted = data.transactions.filter((t) => t.status === "posted" && t.affectsBalance && t.type !== "transfer" && t.date.startsWith(monthPrefix));
+  const grossExpense = posted.filter((t) => ["expense", "installment_payment"].includes(t.type)).reduce((s, t) => s + t.amountCents, 0);
+  const refunds = posted.filter((t) => t.type === "refund").reduce((s, t) => s + t.amountCents, 0);
+  const expense = Math.max(0, grossExpense - refunds);
+  const income = posted.filter((t) => ["income", "salary_payment"].includes(t.type)).reduce((s, t) => s + t.amountCents, 0);
+  const categoryTrend = monthlyCategorySpendingTrend(data.transactions, data.categories, TODAY);
+  const categoryLines = categoryTrend.days.map(({ date, amounts }) => ({ date, ...Object.fromEntries(Object.entries(amounts).map(([id, cents]) => [id, cents / 100])) }));
+  const pie = categoryTrend.series.map((series) => ({ name: series.name, value: series.totalCents / 100 }));
+  const trend = Array.from({ length: Math.ceil(categoryTrend.days.length / 7) }, (_, index) => ({ name: `第${index + 1}周`, 支出: 0 }));
+  categoryTrend.days.forEach((day, index) => { trend[Math.floor(index / 7)].支出 += Object.values(day.amounts).reduce((sum, cents) => sum + cents, 0) / 100; });
   const dailyTrend = dailyConsumptionTrend(data.transactions, TODAY, 30).map((item) => ({ date: item.date, 消费: item.amountCents / 100 }));
-  return <div className="page-stack"><section className="analytics-metrics"><div><span>本月收入</span><strong className="positive">{formatMoney(income)}</strong></div><div><span>本月支出</span><strong className="negative">{formatMoney(expense)}</strong></div><div><span>净结余</span><strong>{formatMoney(income - expense)}</strong></div><div><span>日均消费</span><strong>{formatMoney(Math.round(expense / 31))}</strong></div></section><Card title="近30天每日消费"><div className="chart daily-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={dailyTrend} margin={{ top: 8, right: 12, left: 0, bottom: 4 }}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="date" tickFormatter={(value) => String(value).slice(5).replace("-", "/")} minTickGap={24} /><YAxis tickFormatter={(value) => `¥${value}`} width={52} /><Tooltip labelFormatter={(label) => String(label)} formatter={(value) => [`¥${Number(value).toFixed(2)}`, "消费"]} /><Line type="monotone" dataKey="消费" stroke="#20b8c4" strokeWidth={3} dot={false} activeDot={{ r: 5, fill: "#3b82f6", stroke: "#dffcff", strokeWidth: 2 }} /></LineChart></ResponsiveContainer></div><p className="chart-note">按本机日期统计最近 30 个自然日；退款会冲减退款当天消费，最低显示为 ¥0。</p></Card><div className="content-grid"><Card title="每周消费趋势"><div className="chart"><ResponsiveContainer width="100%" height="100%"><AreaChart data={trend}><defs><linearGradient id="trend" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="#22a6b3" stopOpacity={0.5}/><stop offset="100%" stopColor="#22a6b3" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="name" /><YAxis /><Tooltip /><Area dataKey="支出" stroke="#138697" fill="url(#trend)" /></AreaChart></ResponsiveContainer></div></Card><Card title="分类支出占比">{pie.length ? <div className="chart pie"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={pie} dataKey="value" nameKey="name" innerRadius={55} outerRadius={85}>{pie.map((_, index) => <Cell key={index} fill={palette[index % palette.length]} />)}</Pie><Tooltip formatter={(v) => `¥${Number(v).toFixed(2)}`} /></PieChart></ResponsiveContainer></div> : <Empty text="记录支出后会在这里生成图表" />}</Card></div></div>;
+  const elapsedDays = Math.max(1, Number(TODAY.slice(-2)));
+  return <div className="page-stack"><section className="analytics-metrics"><div><span>本月收入</span><strong className="positive">{formatMoney(income)}</strong></div><div><span>本月支出</span><strong className="negative">{formatMoney(expense)}</strong></div><div><span>净结余</span><strong>{formatMoney(income - expense)}</strong></div><div><span>本月日均消费</span><strong>{formatMoney(Math.round(expense / elapsedDays))}</strong></div></section><Card title="近30天每日消费"><div className="chart daily-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={dailyTrend} margin={{ top: 8, right: 12, left: 0, bottom: 4 }}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="date" tickFormatter={(value) => String(value).slice(5).replace("-", "/")} minTickGap={24} /><YAxis tickFormatter={(value) => `¥${value}`} width={52} /><Tooltip labelFormatter={(label) => String(label)} formatter={(value) => [`¥${Number(value).toFixed(2)}`, "消费"]} /><Line type="monotone" dataKey="消费" stroke="#20b8c4" strokeWidth={3} dot={false} activeDot={{ r: 5, fill: "#3b82f6", stroke: "#dffcff", strokeWidth: 2 }} /></LineChart></ResponsiveContainer></div><p className="chart-note">按本机日期统计最近 30 个自然日；退款会冲减退款当天消费，最低显示为 ¥0。</p></Card><Card title={`${categoryTrend.month.replace("-", " 年 ")} 月 · 分类每日支出`}>{categoryTrend.series.length ? <><div className="category-line-legend">{categoryTrend.series.map((series, index) => <div key={series.id}><i style={{ background: palette[index % palette.length] }} /><span>{series.name}</span><strong>{formatMoney(series.totalCents)}</strong></div>)}</div><div className="chart category-line-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={categoryLines} margin={{ top: 10, right: 12, left: 0, bottom: 4 }}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="date" tickFormatter={(value) => String(value).slice(-2)} minTickGap={22} /><YAxis tickFormatter={(value) => `¥${value}`} width={52} /><Tooltip labelFormatter={(label) => `${String(label).slice(5).replace("-", "月")}日`} formatter={(value, name) => [`¥${Number(value).toFixed(2)}`, categoryTrend.series.find((series) => series.id === name)?.name ?? name]} />{categoryTrend.series.map((series, index) => <Line key={series.id} type="linear" dataKey={series.id} name={series.id} stroke={palette[index % palette.length]} strokeWidth={2.4} dot={false} activeDot={{ r: 4 }} />)}</LineChart></ResponsiveContainer></div><p className="chart-note">以自然月为一个周期，每种支出分类显示为一条独立直线；上方图例同时显示本月分类合计。</p></> : <Empty text="本月记录支出后会显示分类折线" />}</Card><div className="content-grid"><Card title="本月每周消费趋势"><div className="chart"><ResponsiveContainer width="100%" height="100%"><AreaChart data={trend}><defs><linearGradient id="trend" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="#22a6b3" stopOpacity={0.5}/><stop offset="100%" stopColor="#22a6b3" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="name" /><YAxis /><Tooltip formatter={(value) => [`¥${Number(value).toFixed(2)}`, "支出"]} /><Area dataKey="支出" stroke="#138697" fill="url(#trend)" /></AreaChart></ResponsiveContainer></div></Card><Card title="本月分类支出占比">{pie.length ? <div className="chart pie"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={pie} dataKey="value" nameKey="name" innerRadius={55} outerRadius={85}>{pie.map((_, index) => <Cell key={index} fill={palette[index % palette.length]} />)}</Pie><Tooltip formatter={(v) => `¥${Number(v).toFixed(2)}`} /></PieChart></ResponsiveContainer></div> : <Empty text="本月记录支出后会在这里生成图表" />}</Card></div></div>;
 }
 
 function AccountsView({ data, metrics: m, onRefresh, setToast }: { data: LedgerSnapshot; metrics: ReturnType<typeof deriveMetrics>; onRefresh: () => Promise<void>; setToast: (s: string) => void }) {

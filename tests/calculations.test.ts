@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   calculateAccountBalances, calculateSafetyLine, calculateSalarySnapshot, calculateWeeklyBudget, expectedPayDate,
-  dailyConsumptionTrend, forecastCashflow, simulatePurchase, summarizeInstallments,
+  dailyConsumptionTrend, forecastCashflow, monthlyCategorySpendingTrend, simulatePurchase, summarizeInstallments,
 } from "../lib/calculations";
-import type { Account, Attendance, BudgetSettings, InstallmentItem, LedgerTransaction, SalaryPlan } from "../lib/types";
+import type { Account, Attendance, BudgetSettings, Category, InstallmentItem, LedgerTransaction, SalaryPlan } from "../lib/types";
 
 const account: Account = { id: "a", name: "零钱通", icon: "wallet", openingBalanceCents: 135855, balanceAsOf: "2026-07-16", hidden: false, sort: 1 };
 const baseTx = (partial: Partial<LedgerTransaction>): LedgerTransaction => ({
@@ -36,6 +36,24 @@ describe("账户与交易", () => {
     expect(trend[0]).toEqual({ date: "2026-07-01", amountCents: 3800 });
     expect(trend[1]).toEqual({ date: "2026-07-02", amountCents: 0 });
     expect(trend[29]).toEqual({ date: "2026-07-30", amountCents: 35800 });
+  });
+  it("月度分类折线覆盖完整自然月并按类别汇总", () => {
+    const categories: Category[] = [
+      { id: "meal", kind: "expense", name: "正餐", icon: "Utensils", defaultBudget: true, archived: false, sort: 1 },
+      { id: "traffic", kind: "expense", name: "交通", icon: "Bus", defaultBudget: true, archived: false, sort: 2 },
+    ];
+    const trend = monthlyCategorySpendingTrend([
+      baseTx({ id: "meal-1", categoryId: "meal", date: "2026-07-02", amountCents: 1500 }),
+      baseTx({ id: "meal-2", categoryId: "meal", date: "2026-07-26", amountCents: 2500 }),
+      baseTx({ id: "traffic-1", categoryId: "traffic", date: "2026-07-02", amountCents: 300 }),
+      baseTx({ id: "previous", categoryId: "meal", date: "2026-06-30", amountCents: 9999 }),
+      baseTx({ id: "void", categoryId: "traffic", date: "2026-07-03", status: "void", amountCents: 9999 }),
+    ], categories, "2026-07-26");
+    expect(trend.month).toBe("2026-07");
+    expect(trend.days).toHaveLength(31);
+    expect(trend.series.map(({ id, totalCents }) => [id, totalCents])).toEqual([["meal", 4000], ["traffic", 300]]);
+    expect(trend.days[1].amounts).toEqual({ meal: 1500, traffic: 300 });
+    expect(trend.days[30].amounts).toEqual({ meal: 0, traffic: 0 });
   });
 });
 

@@ -10,7 +10,7 @@ export interface CloudEnvelope extends VersionStamp {
   recordId: string;
   data: unknown | null;
   deleted: boolean;
-  schemaVersion: 2;
+  schemaVersion: 3;
   serverVersion?: number;
   updatedAt?: unknown;
 }

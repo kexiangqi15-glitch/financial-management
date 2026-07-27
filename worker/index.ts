@@ -33,7 +33,8 @@ const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const PULL_LIMIT = 1000;
 const allowedEntities = new Set<string>([
   "accounts", "categories", "transactions", "salaryPlans", "attendance", "installmentPlans",
-  "installmentItems", "reserves", "budgets", "settings", "attachments",
+  "salarySettlements", "salaryAdjustments", "installmentItems", "reserves", "recurringRules",
+  "financialGoals", "receivables", "reconciliations", "importBatches", "budgets", "settings", "attachments",
 ] satisfies SyncEntity[]);
 
 export default {
@@ -50,6 +51,11 @@ export default {
         await touchUser(env.DB, identity, null, request.headers.get("user-agent"));
         const recordCount = await countRecords(env.DB, identity.ownerKey);
         return json({ profile: publicProfile(identity), recordCount });
+      }
+
+      if (url.pathname === `${API_PREFIX}/security` && request.method === "GET") {
+        await touchUser(env.DB, identity, null, request.headers.get("user-agent"));
+        return json(await securityOverview(env.DB, identity.ownerKey));
       }
 
       if (url.pathname.startsWith(`${API_PREFIX}/attachments/`) && request.method === "GET") {
@@ -299,6 +305,36 @@ async function readRecord(db: D1Database, ownerKey: string, entityType: SyncEnti
 async function countRecords(db: D1Database, ownerKey: string) {
   const row = await db.prepare("SELECT COUNT(*) AS count FROM sync_records WHERE owner_key = ?").bind(ownerKey).first<{ count: number }>();
   return Number(row?.count ?? 0);
+}
+
+async function securityOverview(db: D1Database, ownerKey: string) {
+  const devices = await db.prepare(`
+    SELECT device_id, user_agent, last_seen_at
+    FROM sync_devices
+    WHERE owner_key = ?
+    ORDER BY last_seen_at DESC
+    LIMIT 20
+  `).bind(ownerKey).all<{ device_id: string; user_agent: string | null; last_seen_at: string }>();
+  const conflicts = await db.prepare(`
+    SELECT entity_type, record_id, reason, archived_at
+    FROM sync_history
+    WHERE owner_key = ?
+    ORDER BY archived_at DESC
+    LIMIT 20
+  `).bind(ownerKey).all<{ entity_type: string; record_id: string; reason: string; archived_at: string }>();
+  return {
+    devices: (devices.results ?? []).map((item) => ({
+      deviceId: item.device_id,
+      userAgent: item.user_agent,
+      lastSeenAt: item.last_seen_at,
+    })),
+    conflicts: (conflicts.results ?? []).map((item) => ({
+      entityType: item.entity_type,
+      recordId: item.record_id,
+      reason: item.reason,
+      archivedAt: item.archived_at,
+    })),
+  };
 }
 
 function toPublicEnvelope(row: StoredSyncRecord): CloudEnvelope {

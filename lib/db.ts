@@ -1,5 +1,10 @@
 import Dexie, { type EntityTable } from "dexie";
-import type { Account, AppSetting, AttachmentRecord, Attendance, BudgetSettings, Category, InstallmentItem, InstallmentPlan, LedgerSnapshot, LedgerTransaction, Reserve, SalaryPlan, SyncEntity, SyncMetaRecord, SyncQueueItem } from "./types";
+import type {
+  Account, AppSetting, AttachmentRecord, Attendance, BudgetSettings, Category, FinancialGoal,
+  ImportBatch, InstallmentItem, InstallmentPlan, LedgerSnapshot, LedgerTransaction, Receivable,
+  ReconciliationSnapshot, RecurringRule, Reserve, SalaryAdjustment, SalaryPlan, SalarySettlement,
+  SyncEntity, SyncMetaRecord, SyncQueueItem,
+} from "./types";
 import { uid } from "./types";
 import * as seed from "./seed";
 
@@ -9,9 +14,16 @@ class QinglanDB extends Dexie {
   transactions!: EntityTable<LedgerTransaction, "id">;
   salaryPlans!: EntityTable<SalaryPlan, "id">;
   attendance!: EntityTable<Attendance, "id">;
+  salarySettlements!: EntityTable<SalarySettlement, "id">;
+  salaryAdjustments!: EntityTable<SalaryAdjustment, "id">;
   installmentPlans!: EntityTable<InstallmentPlan, "id">;
   installmentItems!: EntityTable<InstallmentItem, "id">;
   reserves!: EntityTable<Reserve, "id">;
+  recurringRules!: EntityTable<RecurringRule, "id">;
+  financialGoals!: EntityTable<FinancialGoal, "id">;
+  receivables!: EntityTable<Receivable, "id">;
+  reconciliations!: EntityTable<ReconciliationSnapshot, "id">;
+  importBatches!: EntityTable<ImportBatch, "id">;
   budgets!: EntityTable<BudgetSettings, "id">;
   settings!: EntityTable<AppSetting, "key">;
   attachments!: EntityTable<AttachmentRecord, "id">;
@@ -31,13 +43,28 @@ class QinglanDB extends Dexie {
       reserves: "id, kind", budgets: "id", settings: "key", attachments: "id",
       syncQueue: "id, entityType, localUpdatedAt", syncMeta: "key",
     });
+    this.version(3).stores({
+      accounts: "id, name, sort", categories: "id, kind, parentId, sort", transactions: "id, type, status, date, accountId, categoryId",
+      salaryPlans: "id, active", attendance: "id, planId, date, [planId+date]",
+      salarySettlements: "id, planId, periodEnd, transactionId", salaryAdjustments: "id, settlementId, createdAt",
+      installmentPlans: "id", installmentItems: "id, planId, dueDate, status",
+      reserves: "id, kind", recurringRules: "id, nextDate, active", financialGoals: "id, targetDate, active",
+      receivables: "id, dueDate, status", reconciliations: "id, accountId, date",
+      importBatches: "id, importedAt, status",
+      budgets: "id", settings: "key", attachments: "id",
+      syncQueue: "id, entityType, localUpdatedAt", syncMeta: "key",
+    });
   }
 }
 export const db = new QinglanDB();
 
 export async function initializeDatabase() {
   const initialized = await db.settings.get("initialized");
-  if (initialized) return;
+  if (initialized) {
+    const budget = await db.budgets.get("main");
+    if (budget && !budget.budgetPeriod) await db.budgets.update("main", { budgetPeriod: "weekly" });
+    return;
+  }
   await db.transaction("rw", [db.accounts, db.categories, db.transactions, db.salaryPlans, db.attendance, db.installmentPlans, db.installmentItems, db.reserves, db.budgets, db.settings], async () => {
     await db.accounts.bulkPut(seed.accounts); await db.categories.bulkPut(seed.categories); await db.transactions.bulkPut(seed.transactions);
     await db.salaryPlans.bulkPut(seed.salaryPlans); await db.attendance.bulkPut(seed.attendance); await db.installmentPlans.bulkPut(seed.installmentPlans);
@@ -47,18 +74,35 @@ export async function initializeDatabase() {
 }
 
 export async function loadSnapshot(): Promise<LedgerSnapshot> {
-  const [accounts, categories, transactions, salaryPlans, attendance, installmentPlans, installmentItems, reserves, budget] = await Promise.all([
+  const [
+    accounts, categories, transactions, salaryPlans, attendance, salarySettlements, salaryAdjustments,
+    installmentPlans, installmentItems, reserves, recurringRules, financialGoals, receivables,
+    reconciliations, importBatches, budget,
+  ] = await Promise.all([
     db.accounts.orderBy("sort").toArray(), db.categories.orderBy("sort").toArray(), db.transactions.orderBy("date").reverse().toArray(),
-    db.salaryPlans.toArray(), db.attendance.orderBy("date").toArray(), db.installmentPlans.toArray(), db.installmentItems.orderBy("dueDate").toArray(),
-    db.reserves.toArray(), db.budgets.get("main"),
+    db.salaryPlans.toArray(), db.attendance.orderBy("date").toArray(),
+    db.salarySettlements.orderBy("periodEnd").toArray(), db.salaryAdjustments.orderBy("createdAt").reverse().toArray(),
+    db.installmentPlans.toArray(), db.installmentItems.orderBy("dueDate").toArray(),
+    db.reserves.toArray(), db.recurringRules.orderBy("nextDate").toArray(),
+    db.financialGoals.orderBy("targetDate").toArray(), db.receivables.orderBy("dueDate").toArray(),
+    db.reconciliations.orderBy("date").reverse().toArray(), db.importBatches.orderBy("importedAt").reverse().toArray(), db.budgets.get("main"),
   ]);
   if (!budget) throw new Error("预算设置缺失，请在设置中恢复示例数据");
-  return { accounts, categories, transactions, salaryPlans, attendance, installmentPlans, installmentItems, reserves, budget };
+  return {
+    accounts, categories, transactions, salaryPlans, attendance, salarySettlements, salaryAdjustments,
+    installmentPlans, installmentItems, reserves, recurringRules, financialGoals, receivables,
+    reconciliations, importBatches, budget,
+  };
 }
 
 export async function resetDatabase() {
   const previous = await listAllRecordIdentities();
-  await Promise.all([db.accounts.clear(), db.categories.clear(), db.transactions.clear(), db.salaryPlans.clear(), db.attendance.clear(), db.installmentPlans.clear(), db.installmentItems.clear(), db.reserves.clear(), db.budgets.clear(), db.settings.clear(), db.attachments.clear()]);
+  await Promise.all([
+    db.accounts.clear(), db.categories.clear(), db.transactions.clear(), db.salaryPlans.clear(), db.attendance.clear(),
+    db.salarySettlements.clear(), db.salaryAdjustments.clear(), db.installmentPlans.clear(), db.installmentItems.clear(),
+    db.reserves.clear(), db.recurringRules.clear(), db.financialGoals.clear(), db.receivables.clear(),
+    db.reconciliations.clear(), db.importBatches.clear(), db.budgets.clear(), db.settings.clear(), db.attachments.clear(),
+  ]);
   await Promise.all(previous.map(({ entityType, recordId }) => queueLocalChange(entityType, recordId, "delete")));
   await initializeDatabase();
   await queueAllLocalData();
@@ -67,19 +111,35 @@ export async function resetDatabase() {
 export async function exportBackup() {
   const snapshot = await loadSnapshot();
   const attachments = await db.attachments.toArray();
+  const settings = (await db.settings.toArray()).filter((setting) => setting.key !== "initialized");
   const encoded = await Promise.all(attachments.map(async (a) => ({ ...a, blob: await blobToDataUrl(a.blob) })));
-  return JSON.stringify({ schemaVersion: 1, exportedAt: new Date().toISOString(), ...snapshot, attachments: encoded }, null, 2);
+  return JSON.stringify({ schemaVersion: 2, exportedAt: new Date().toISOString(), ...snapshot, settings, attachments: encoded }, null, 2);
 }
 
 export async function importBackup(json: string, mode: "merge" | "replace") {
-  const value = JSON.parse(json) as Partial<LedgerSnapshot> & { schemaVersion?: number; attachments?: Array<Omit<AttachmentRecord, "blob"> & { blob: string }> };
-  if (value.schemaVersion !== 1 || !Array.isArray(value.accounts) || !Array.isArray(value.transactions)) throw new Error("不是有效的青蓝账本 v1 备份");
+  const value = JSON.parse(json) as Partial<LedgerSnapshot> & { schemaVersion?: number; settings?: AppSetting[]; attachments?: Array<Omit<AttachmentRecord, "blob"> & { blob: string }> };
+  if (![1, 2].includes(value.schemaVersion ?? 0) || !Array.isArray(value.accounts) || !Array.isArray(value.transactions)) throw new Error("不是有效的青蓝账本备份");
   const previous = mode === "replace" ? await listAllRecordIdentities() : [];
-  await db.transaction("rw", [db.accounts, db.categories, db.transactions, db.salaryPlans, db.attendance, db.installmentPlans, db.installmentItems, db.reserves, db.budgets, db.attachments], async () => {
-    if (mode === "replace") await Promise.all([db.accounts.clear(), db.categories.clear(), db.transactions.clear(), db.salaryPlans.clear(), db.attendance.clear(), db.installmentPlans.clear(), db.installmentItems.clear(), db.reserves.clear(), db.budgets.clear(), db.attachments.clear()]);
+  await db.transaction("rw", [
+    db.accounts, db.categories, db.transactions, db.salaryPlans, db.attendance, db.salarySettlements,
+    db.salaryAdjustments, db.installmentPlans, db.installmentItems, db.reserves, db.recurringRules,
+    db.financialGoals, db.receivables, db.reconciliations, db.importBatches, db.budgets, db.settings, db.attachments,
+  ], async () => {
+    if (mode === "replace") await Promise.all([
+      db.accounts.clear(), db.categories.clear(), db.transactions.clear(), db.salaryPlans.clear(), db.attendance.clear(),
+      db.salarySettlements.clear(), db.salaryAdjustments.clear(), db.installmentPlans.clear(), db.installmentItems.clear(),
+      db.reserves.clear(), db.recurringRules.clear(), db.financialGoals.clear(), db.receivables.clear(),
+      db.reconciliations.clear(), db.importBatches.clear(), db.budgets.clear(), db.settings.filter((setting) => setting.key !== "initialized").delete(), db.attachments.clear(),
+    ]);
     await db.accounts.bulkPut(value.accounts ?? []); await db.categories.bulkPut(value.categories ?? []); await db.transactions.bulkPut(value.transactions ?? []);
-    await db.salaryPlans.bulkPut(value.salaryPlans ?? []); await db.attendance.bulkPut(value.attendance ?? []); await db.installmentPlans.bulkPut(value.installmentPlans ?? []);
-    await db.installmentItems.bulkPut(value.installmentItems ?? []); await db.reserves.bulkPut(value.reserves ?? []); if (value.budget) await db.budgets.put(value.budget);
+    await db.salaryPlans.bulkPut(value.salaryPlans ?? []); await db.attendance.bulkPut(value.attendance ?? []);
+    await db.salarySettlements.bulkPut(value.salarySettlements ?? []); await db.salaryAdjustments.bulkPut(value.salaryAdjustments ?? []);
+    await db.installmentPlans.bulkPut(value.installmentPlans ?? []); await db.installmentItems.bulkPut(value.installmentItems ?? []);
+    await db.reserves.bulkPut(value.reserves ?? []); await db.recurringRules.bulkPut(value.recurringRules ?? []);
+    await db.financialGoals.bulkPut(value.financialGoals ?? []); await db.receivables.bulkPut(value.receivables ?? []);
+    await db.reconciliations.bulkPut(value.reconciliations ?? []); await db.importBatches.bulkPut(value.importBatches ?? []);
+    if (value.budget) await db.budgets.put(value.budget);
+    await db.settings.bulkPut((value.settings ?? []).filter((setting) => setting.key !== "initialized"));
     if (value.attachments?.length) await db.attachments.bulkPut(value.attachments.map((a) => ({ ...a, blob: dataUrlToBlob(a.blob) })));
   });
   if (mode === "replace") {
@@ -99,7 +159,9 @@ function blobToDataUrl(blob: Blob): Promise<string> { return new Promise((resolv
 function dataUrlToBlob(value: string) { const [header, body] = value.split(","); const type = /data:(.*?);/.exec(header)?.[1] ?? "application/octet-stream"; const binary = atob(body); const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0)); return new Blob([bytes], { type }); }
 
 export const syncEntityNames: SyncEntity[] = [
-  "accounts", "categories", "transactions", "salaryPlans", "attendance", "installmentPlans", "installmentItems", "reserves", "budgets", "settings", "attachments",
+  "accounts", "categories", "transactions", "salaryPlans", "attendance", "salarySettlements", "salaryAdjustments",
+  "installmentPlans", "installmentItems", "reserves", "recurringRules", "financialGoals", "receivables",
+  "reconciliations", "importBatches", "budgets", "settings", "attachments",
 ];
 
 export function getDeviceId() {
@@ -211,9 +273,16 @@ export async function listLegacyCustomizations(): Promise<LegacyCustomization[]>
     transactions: seed.transactions,
     salaryPlans: seed.salaryPlans,
     attendance: seed.attendance,
+    salarySettlements: [],
+    salaryAdjustments: [],
     installmentPlans: seed.installmentPlans,
     installmentItems: seed.installmentItems,
     reserves: seed.reserves,
+    recurringRules: [],
+    financialGoals: [],
+    receivables: [],
+    reconciliations: [],
+    importBatches: [],
     budgets: [seed.budget],
     settings: [],
     attachments: [],

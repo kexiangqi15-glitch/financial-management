@@ -63,6 +63,7 @@ export const reserves: Reserve[] = [
 export const budget: BudgetSettings = {
   id: "main", weeklyCapCents: 35000, weekStartsOn: 1, rolloverMode: "reset", safetyMode: "30d", customSafetyCents: 235800,
   schoolDate: "2026-09-01", customForecastDate: "2026-09-15",
+  budgetPeriod: "weekly",
   categoryLimits: { "餐饮改善": 15000, "咖啡": 4000, "娱乐": 8000, "交通": 3000, "机动资金": 5000 },
 };
 export const transactions: LedgerTransaction[] = [{

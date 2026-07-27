@@ -4,11 +4,14 @@ import type {
   BudgetSettings,
   Category,
   Cents,
+  FinancialGoal,
   InstallmentItem,
   LedgerTransaction,
   LocalDate,
+  RecurringRule,
   Reserve,
   SalaryPlan,
+  SalarySettlement,
 } from "./types";
 
 const DAY = 86_400_000;
@@ -29,6 +32,51 @@ export const addDays = (date: LocalDate, days: number) => {
 };
 export const daysBetween = (from: LocalDate, to: LocalDate) =>
   Math.max(0, Math.ceil((parseLocalDate(to).getTime() - parseLocalDate(from).getTime()) / DAY));
+
+export function monthBounds(month: string) {
+  const [year, monthNumber] = month.split("-").map(Number);
+  const start = `${year}-${String(monthNumber).padStart(2, "0")}-01` as LocalDate;
+  const lastDay = new Date(year, monthNumber, 0, 12).getDate();
+  return { start, end: `${year}-${String(monthNumber).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}` as LocalDate };
+}
+
+function addMonths(date: LocalDate, months: number) {
+  const parsed = parseLocalDate(date);
+  const wantedDay = parsed.getDate();
+  parsed.setDate(1);
+  parsed.setMonth(parsed.getMonth() + months);
+  const lastDay = new Date(parsed.getFullYear(), parsed.getMonth() + 1, 0, 12).getDate();
+  parsed.setDate(Math.min(wantedDay, lastDay));
+  return toLocalDate(parsed);
+}
+
+function addYears(date: LocalDate, years: number) {
+  const parsed = parseLocalDate(date);
+  const month = parsed.getMonth();
+  parsed.setFullYear(parsed.getFullYear() + years);
+  if (parsed.getMonth() !== month) parsed.setDate(0);
+  return toLocalDate(parsed);
+}
+
+export function nextRecurringDate(rule: RecurringRule, from = rule.nextDate) {
+  const interval = Math.max(1, Math.floor(rule.interval));
+  if (rule.frequency === "weekly") return addDays(from, interval * 7);
+  if (rule.frequency === "yearly") return addYears(from, interval);
+  return addMonths(from, interval);
+}
+
+export function recurringOccurrences(rule: RecurringRule, from: LocalDate, to: LocalDate) {
+  if (!rule.active || to < rule.nextDate || rule.endDate && rule.nextDate > rule.endDate) return [];
+  const dates: LocalDate[] = [];
+  let current = rule.nextDate;
+  let guard = 0;
+  while (current <= to && guard < 500) {
+    if (current >= from && (!rule.endDate || current <= rule.endDate)) dates.push(current);
+    current = nextRecurringDate(rule, current);
+    guard += 1;
+  }
+  return dates;
+}
 
 export function dailyConsumptionTrend(
   transactions: LedgerTransaction[],
@@ -139,8 +187,10 @@ export function calculateAccountBalances(accounts: Account[], transactions: Ledg
     if (tx.status !== "posted" || !tx.affectsBalance) continue;
     const account = accounts.find((a) => a.id === tx.accountId);
     if (!account || tx.date < account.balanceAsOf) continue;
-    const incoming = ["income", "refund", "loan_repayment", "salary_payment", "adjustment"].includes(tx.type);
-    const outgoing = ["expense", "loan_out", "installment_payment"].includes(tx.type);
+    const incoming = ["income", "refund", "loan_repayment", "salary_payment"].includes(tx.type)
+      || (tx.type === "adjustment" && tx.adjustmentDirection !== "out");
+    const outgoing = ["expense", "loan_out", "installment_payment"].includes(tx.type)
+      || (tx.type === "adjustment" && tx.adjustmentDirection === "out");
     if (incoming) balances[tx.accountId] = (balances[tx.accountId] ?? 0) + tx.amountCents;
     if (outgoing) balances[tx.accountId] = (balances[tx.accountId] ?? 0) - tx.amountCents;
     if (tx.type === "transfer" && tx.toAccountId) {
@@ -171,7 +221,12 @@ export function expectedPayDate(plan: SalaryPlan, workDate: LocalDate): LocalDat
 
 export function salaryExpectedPayments(plan: SalaryPlan, attendance: Attendance[]) {
   const grouped = new Map<LocalDate, Cents>();
-  attendance.filter((a) => a.planId === plan.id && a.status === "worked").forEach((a) => {
+  attendance.filter((a) =>
+    a.planId === plan.id
+    && a.status === "worked"
+    && a.date >= plan.startDate
+    && a.date <= plan.endDate
+  ).forEach((a) => {
     const date = expectedPayDate(plan, a.date);
     grouped.set(date, (grouped.get(date) ?? 0) + a.earnedCents);
   });
@@ -182,13 +237,34 @@ export function calculateSalarySnapshot(
   plans: SalaryPlan[], attendance: Attendance[], transactions: LedgerTransaction[], asOf: LocalDate,
 ) {
   const planIds = new Set(plans.map((p) => p.id));
-  const relevant = attendance.filter((a) => planIds.has(a.planId) && a.status === "worked");
+  const planById = new Map(plans.map((plan) => [plan.id, plan]));
+  const relevant = attendance.filter((a) => {
+    const plan = planById.get(a.planId);
+    return planIds.has(a.planId) && a.status === "worked" && Boolean(plan && a.date >= plan.startDate && a.date <= plan.endDate);
+  });
   const earnedCents = relevant.filter((a) => a.date <= asOf).reduce((s, a) => s + a.earnedCents, 0);
   const futureCents = relevant.filter((a) => a.date > asOf).reduce((s, a) => s + a.earnedCents, 0);
   const paidCents = transactions
     .filter((t) => t.type === "salary_payment" && t.status === "posted" && t.date <= asOf)
     .reduce((s, t) => s + t.amountCents, 0);
   return { earnedCents, paidCents, receivableCents: Math.max(0, earnedCents - paidCents), futureCents };
+}
+
+export function calculateSettlementAmount(
+  settlement: SalarySettlement,
+  attendance: Attendance[],
+  plan: SalaryPlan,
+) {
+  const attendanceIds = new Set(settlement.attendanceIds);
+  return (settlement.baselineCents ?? 0) + attendance
+    .filter((item) =>
+      attendanceIds.has(item.id)
+      && item.planId === plan.id
+      && item.status === "worked"
+      && item.date >= plan.startDate
+      && item.date <= plan.endDate
+    )
+    .reduce((sum, item) => sum + item.earnedCents, 0);
 }
 
 export function safetyHorizon(asOf: LocalDate, settings: BudgetSettings): LocalDate {
@@ -200,14 +276,16 @@ export function safetyHorizon(asOf: LocalDate, settings: BudgetSettings): LocalD
 
 export function calculateSafetyLine(
   reserves: Reserve[], installments: InstallmentItem[], settings: BudgetSettings, asOf: LocalDate,
+  goals: FinancialGoal[] = [],
 ) {
   if (settings.safetyMode === "custom") return { totalCents: settings.customSafetyCents, reserveCents: settings.customSafetyCents, installmentCents: 0 };
   const reserveCents = reserves.filter((r) => r.active).reduce((s, r) => s + r.amountCents, 0);
+  const goalCents = goals.filter((goal) => goal.active).reduce((sum, goal) => sum + goal.savedCents, 0);
   const horizon = safetyHorizon(asOf, settings);
   const installmentCents = installments
     .filter((i) => i.status === "unpaid" && i.dueDate >= asOf && i.dueDate <= horizon)
     .reduce((s, i) => s + i.amountCents, 0);
-  return { totalCents: reserveCents + installmentCents, reserveCents, installmentCents };
+  return { totalCents: reserveCents + goalCents + installmentCents, reserveCents: reserveCents + goalCents, installmentCents, goalCents };
 }
 
 export function weekBounds(asOf: LocalDate, startsOn: 0 | 1 | 6) {
@@ -259,6 +337,7 @@ export function forecastCashflow(input: {
   targetDate: LocalDate; asOf: LocalDate; currentBalanceCents: Cents;
   expectedIncome: { date: LocalDate; amountCents: Cents }[];
   installments: InstallmentItem[]; plannedTransactions: LedgerTransaction[]; includeExpectedIncome: boolean;
+  recurringRules?: RecurringRule[];
 }) {
   const incomeCents = input.includeExpectedIncome
     ? input.expectedIncome.filter((x) => x.date > input.asOf && x.date <= input.targetDate).reduce((s, x) => s + x.amountCents, 0) : 0;
@@ -268,7 +347,46 @@ export function forecastCashflow(input: {
   const plannedCents = input.plannedTransactions
     .filter((t) => t.status === "planned" && t.date > input.asOf && t.date <= input.targetDate && t.rigid)
     .reduce((s, t) => s + t.amountCents, 0);
-  return { balanceCents: input.currentBalanceCents + incomeCents - installmentCents - plannedCents, incomeCents, expenseCents: installmentCents + plannedCents };
+  const recurringIncomeCents = input.includeExpectedIncome
+    ? (input.recurringRules ?? []).filter((rule) => rule.type === "income")
+      .reduce((sum, rule) => sum + recurringOccurrences(rule, addDays(input.asOf, 1), input.targetDate).length * rule.amountCents, 0)
+    : 0;
+  const recurringExpenseCents = (input.recurringRules ?? []).filter((rule) => rule.type === "expense")
+    .reduce((sum, rule) => sum + recurringOccurrences(rule, addDays(input.asOf, 1), input.targetDate).length * rule.amountCents, 0);
+  return {
+    balanceCents: input.currentBalanceCents + incomeCents + recurringIncomeCents - installmentCents - plannedCents - recurringExpenseCents,
+    incomeCents: incomeCents + recurringIncomeCents,
+    expenseCents: installmentCents + plannedCents + recurringExpenseCents,
+  };
+}
+
+export function monthlyFinanceSummary(transactions: LedgerTransaction[], month: string) {
+  const posted = transactions.filter((transaction) =>
+    transaction.status === "posted"
+    && transaction.affectsBalance
+    && transaction.date.startsWith(month)
+    && transaction.type !== "transfer"
+  );
+  const incomeCents = posted
+    .filter((transaction) => ["income", "salary_payment", "loan_repayment"].includes(transaction.type))
+    .reduce((sum, transaction) => sum + transaction.amountCents, 0);
+  const expenseCents = posted
+    .filter((transaction) => ["expense", "installment_payment", "loan_out"].includes(transaction.type))
+    .reduce((sum, transaction) => sum + transaction.amountCents, 0);
+  const refundCents = posted
+    .filter((transaction) => transaction.type === "refund")
+    .reduce((sum, transaction) => sum + transaction.amountCents, 0);
+  const rigidCents = posted
+    .filter((transaction) => transaction.rigid && ["expense", "installment_payment"].includes(transaction.type))
+    .reduce((sum, transaction) => sum + transaction.amountCents, 0);
+  const netExpenseCents = Math.max(0, expenseCents - refundCents);
+  return {
+    incomeCents,
+    expenseCents: netExpenseCents,
+    netCents: incomeCents - netExpenseCents,
+    rigidCents,
+    savingsRate: incomeCents > 0 ? Math.round((incomeCents - netExpenseCents) / incomeCents * 100) : 0,
+  };
 }
 
 export function simulatePurchase(amountCents: Cents, availableCents: Cents, safetyCents: Cents, weeklyRemainingCents: Cents, nextInstallmentCents: Cents) {

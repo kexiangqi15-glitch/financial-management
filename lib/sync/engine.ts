@@ -255,7 +255,7 @@ export class D1SyncEngine {
           deleted: item.operation === "delete",
           clock: item.localUpdatedAt,
           deviceId: item.deviceId,
-          schemaVersion: 2,
+          schemaVersion: 3,
         },
       });
     }

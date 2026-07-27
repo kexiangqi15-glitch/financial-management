@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import { beforeEach, describe, expect, it } from "vitest";
-import { db, exportBackup, exportTransactionsCsv, initializeDatabase, listLegacyCustomizations, loadSnapshot, queueLocalChange, queuePristineSeedData, resetDatabase } from "../lib/db";
+import { db, exportBackup, exportTransactionsCsv, importBackup, initializeDatabase, listLegacyCustomizations, loadSnapshot, queueLocalChange, queuePristineSeedData, resetDatabase } from "../lib/db";
 
 describe("IndexedDB 持久化与备份", () => {
   beforeEach(async () => { await db.delete(); await db.open(); });
@@ -11,7 +11,7 @@ describe("IndexedDB 持久化与备份", () => {
   });
   it("JSON备份带版本号，CSV包含中文表头", async () => {
     await initializeDatabase(); const snapshot = await loadSnapshot(); const backup = JSON.parse(await exportBackup());
-    expect(backup.schemaVersion).toBe(1); expect(backup.transactions).toHaveLength(1);
+    expect(backup.schemaVersion).toBe(2); expect(backup.transactions).toHaveLength(1);
     expect(exportTransactionsCsv(snapshot.transactions, snapshot.accounts, snapshot.categories)).toContain("\"日期\",\"时间\"");
   });
   it("清空后可恢复示例数据", async () => { await initializeDatabase(); await db.transactions.clear(); await resetDatabase(); expect((await loadSnapshot()).transactions).toHaveLength(1); });
@@ -25,10 +25,13 @@ describe("IndexedDB 持久化与备份", () => {
     await queueLocalChange("transactions", "tx-ps-history", "delete");
     expect((await db.syncQueue.get("transactions:tx-ps-history"))?.operation).toBe("delete");
   });
-  it("v2 数据库包含同步队列与版本元数据表", async () => {
+  it("v3 数据库包含同步队列、工资结算与财务计划表", async () => {
     await initializeDatabase();
-    expect(db.tables.map((table) => table.name)).toEqual(expect.arrayContaining(["syncQueue", "syncMeta"]));
-    expect(db.verno).toBe(2);
+    expect(db.tables.map((table) => table.name)).toEqual(expect.arrayContaining([
+      "syncQueue", "syncMeta", "salarySettlements", "salaryAdjustments",
+      "recurringRules", "financialGoals", "receivables", "reconciliations", "importBatches",
+    ]));
+    expect(db.verno).toBe(3);
   });
   it("升级迁移能识别旧设备上改过的同 ID 数据，避免被另一设备覆盖", async () => {
     await initializeDatabase();
@@ -40,5 +43,19 @@ describe("IndexedDB 持久化与备份", () => {
     await initializeDatabase();
     await queuePristineSeedData();
     expect((await db.syncQueue.get("accounts:acc-lqt"))?.localUpdatedAt).toBe(1);
+  });
+  it("v2备份可以恢复新增财务计划实体和月度结账设置", async () => {
+    await initializeDatabase();
+    await db.financialGoals.add({
+      id: "goal-test", name: "学费", targetCents: 100000, savedCents: 20000,
+      targetDate: "2026-09-01", kind: "education", active: true, createdAt: "now",
+    });
+    await db.settings.put({ key: "monthClose:2026-07", value: { netCents: 50000, closedAt: "now" } });
+    const backup = await exportBackup();
+    await db.financialGoals.clear();
+    await db.settings.delete("monthClose:2026-07");
+    await importBackup(backup, "merge");
+    expect(await db.financialGoals.get("goal-test")).toMatchObject({ savedCents: 20000 });
+    expect(await db.settings.get("monthClose:2026-07")).toBeTruthy();
   });
 });

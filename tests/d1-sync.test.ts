@@ -34,7 +34,7 @@ describe("D1 跨设备增量同步", () => {
       deleted: false,
       clock: 10,
       deviceId: "phone",
-      schemaVersion: 2,
+      schemaVersion: 3,
       serverVersion,
     };
 
@@ -65,4 +65,3 @@ describe("D1 跨设备增量同步", () => {
     expect(await db.syncQueue.count()).toBe(0);
   });
 });
-

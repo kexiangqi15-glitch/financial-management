@@ -51,6 +51,11 @@ export interface LedgerTransaction {
   tags: string[];
   attachmentIds: string[];
   linkedId?: string;
+  adjustmentDirection?: "in" | "out";
+  recurringRuleId?: string;
+  receivableId?: string;
+  salarySettlementId?: string;
+  importBatchId?: string;
   affectsBalance: boolean;
   createdAt: string;
 }
@@ -72,9 +77,33 @@ export interface Attendance {
   id: string;
   planId: string;
   date: LocalDate;
-  status: "worked" | "off" | "leave";
+  status: "worked" | "off" | "leave" | "pending" | "not_employed";
   earnedCents: Cents;
   note?: string;
+}
+
+export interface SalarySettlement {
+  id: string;
+  planId: string;
+  periodStart: LocalDate;
+  periodEnd: LocalDate;
+  attendanceIds: string[];
+  transactionId: string;
+  amountCents: Cents;
+  baselineCents?: Cents;
+  status: "confirmed" | "void";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SalaryAdjustment {
+  id: string;
+  settlementId: string;
+  transactionId: string;
+  previousAmountCents: Cents;
+  nextAmountCents: Cents;
+  reason: string;
+  createdAt: string;
 }
 
 export interface InstallmentPlan {
@@ -106,6 +135,71 @@ export interface Reserve {
   active: boolean;
 }
 
+export interface RecurringRule {
+  id: string;
+  name: string;
+  type: "expense" | "income";
+  amountCents: Cents;
+  accountId: string;
+  categoryId: string;
+  frequency: "weekly" | "monthly" | "yearly";
+  interval: number;
+  nextDate: LocalDate;
+  endDate?: LocalDate;
+  countsTowardBudget: boolean;
+  rigid: boolean;
+  active: boolean;
+  createdAt: string;
+}
+
+export interface FinancialGoal {
+  id: string;
+  name: string;
+  targetCents: Cents;
+  savedCents: Cents;
+  targetDate: LocalDate;
+  kind: "living" | "emergency" | "education" | "purchase" | "other";
+  active: boolean;
+  createdAt: string;
+}
+
+export interface Receivable {
+  id: string;
+  name: string;
+  counterparty: string;
+  direction: "owed_to_me" | "i_owe" | "reimbursement";
+  totalCents: Cents;
+  settledCents: Cents;
+  dueDate: LocalDate;
+  status: "open" | "settled";
+  transactionIds: string[];
+  note?: string;
+  createdAt: string;
+}
+
+export interface ReconciliationSnapshot {
+  id: string;
+  accountId: string;
+  date: LocalDate;
+  bookBalanceCents: Cents;
+  actualBalanceCents: Cents;
+  differenceCents: Cents;
+  adjustmentTransactionId?: string;
+  note?: string;
+  createdAt: string;
+}
+
+export interface ImportBatch {
+  id: string;
+  source: "wechat" | "alipay" | "bank" | "generic";
+  fileName: string;
+  importedAt: string;
+  recordCount: number;
+  duplicateCount: number;
+  transactionIds: string[];
+  status: "imported" | "reverted";
+}
+
 export interface BudgetSettings {
   id: "main";
   weeklyCapCents: Cents;
@@ -116,6 +210,9 @@ export interface BudgetSettings {
   schoolDate: LocalDate;
   customForecastDate: LocalDate;
   categoryLimits: Record<string, Cents>;
+  budgetPeriod?: "weekly" | "monthly" | "custom";
+  customBudgetStart?: LocalDate;
+  customBudgetEnd?: LocalDate;
 }
 
 export interface AppSetting {
@@ -137,9 +234,16 @@ export type SyncEntity =
   | "transactions"
   | "salaryPlans"
   | "attendance"
+  | "salarySettlements"
+  | "salaryAdjustments"
   | "installmentPlans"
   | "installmentItems"
   | "reserves"
+  | "recurringRules"
+  | "financialGoals"
+  | "receivables"
+  | "reconciliations"
+  | "importBatches"
   | "budgets"
   | "settings"
   | "attachments";
@@ -166,9 +270,16 @@ export interface LedgerSnapshot {
   transactions: LedgerTransaction[];
   salaryPlans: SalaryPlan[];
   attendance: Attendance[];
+  salarySettlements: SalarySettlement[];
+  salaryAdjustments: SalaryAdjustment[];
   installmentPlans: InstallmentPlan[];
   installmentItems: InstallmentItem[];
   reserves: Reserve[];
+  recurringRules: RecurringRule[];
+  financialGoals: FinancialGoal[];
+  receivables: Receivable[];
+  reconciliations: ReconciliationSnapshot[];
+  importBatches: ImportBatch[];
   budget: BudgetSettings;
 }
 

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   calculateAccountBalances, calculateSafetyLine, calculateSalarySnapshot, calculateWeeklyBudget, expectedPayDate,
-  dailyConsumptionTrend, forecastCashflow, monthlyCategorySpendingTrend, simulatePurchase, summarizeInstallments,
+  dailyConsumptionTrend, forecastCashflow, monthlyCategorySpendingTrend, monthlyFinanceSummary, recurringOccurrences,
+  simulatePurchase, summarizeInstallments,
 } from "../lib/calculations";
 import type { Account, Attendance, BudgetSettings, Category, InstallmentItem, LedgerTransaction, SalaryPlan } from "../lib/types";
 
@@ -23,6 +24,10 @@ describe("账户与交易", () => {
     expect(balances.a).toBe(115855); expect(balances.b).toBe(20000); expect(balances.a + balances.b).toBe(135855);
   });
   it("退款返还账户余额", () => expect(calculateAccountBalances([account], [baseTx({ type: "refund", amountCents: 2000 })]).a).toBe(137855));
+  it("对账差额调整支持增加与减少余额", () => {
+    expect(calculateAccountBalances([account], [baseTx({ type: "adjustment", adjustmentDirection: "in", amountCents: 500 })]).a).toBe(136355);
+    expect(calculateAccountBalances([account], [baseTx({ type: "adjustment", adjustmentDirection: "out", amountCents: 500 })]).a).toBe(135355);
+  });
   it("近30天每日消费跨月补零、排除转账并冲减退款", () => {
     const trend = dailyConsumptionTrend([
       baseTx({ id: "old", date: "2026-06-30", amountCents: 9999 }),
@@ -79,4 +84,31 @@ describe("安全线、预算、分期和预测", () => {
   it("未来余额按场景决定是否包含预计收入", () => { const base = { targetDate: "2026-08-19" as const, asOf: "2026-07-16" as const, currentBalanceCents: 135855, expectedIncome: [{ date: "2026-08-15" as const, amountCents: 280000 }], installments, plannedTransactions: [] }; expect(forecastCashflow({ ...base, includeExpectedIncome: false }).balanceCents).toBe(100055); expect(forecastCashflow({ ...base, includeExpectedIncome: true }).balanceCents).toBe(380055); });
   it("分期压力按30/60/90天汇总", () => expect(summarizeInstallments(installments, "2026-07-16")).toMatchObject({ remainingCount: 2, pressure30Cents: 35800, pressure60Cents: 35800, pressure90Cents: 71600 }));
   it("消费模拟给出确定性风险建议", () => expect(simulatePurchase(10000, 250000, 235800, 20000, 35800)).toMatchObject({ afterBalanceCents: 240000, afterWeeklyCents: 10000, safetyGapCents: 0, recommended: true }));
+  it("储蓄目标已存金额会进入安全线", () => {
+    const result = calculateSafetyLine([], [], budget, "2026-07-16", [{
+      id: "g", name: "学费", targetCents: 100000, savedCents: 30000, targetDate: "2026-09-01",
+      kind: "education", active: true, createdAt: "now",
+    }]);
+    expect(result.totalCents).toBe(30000);
+  });
+  it("周期账单按月生成预测且不会直接修改当前余额", () => {
+    const rule = {
+      id: "r", name: "话费", type: "expense" as const, amountCents: 5000, accountId: "a", categoryId: "c",
+      frequency: "monthly" as const, interval: 1, nextDate: "2026-07-31" as const,
+      countsTowardBudget: true, rigid: true, active: true, createdAt: "now",
+    };
+    expect(recurringOccurrences(rule, "2026-07-01", "2026-09-30")).toEqual(["2026-07-31", "2026-08-31", "2026-09-30"]);
+    expect(forecastCashflow({
+      targetDate: "2026-09-30", asOf: "2026-07-16", currentBalanceCents: 100000,
+      expectedIncome: [], installments: [], plannedTransactions: [], recurringRules: [rule], includeExpectedIncome: false,
+    }).balanceCents).toBe(85000);
+  });
+  it("月度报告计算净结余、刚性占比和储蓄率", () => {
+    const result = monthlyFinanceSummary([
+      baseTx({ id: "income", type: "income", amountCents: 100000 }),
+      baseTx({ id: "expense", type: "expense", amountCents: 30000, rigid: true }),
+      baseTx({ id: "refund", type: "refund", amountCents: 5000 }),
+    ], "2026-07");
+    expect(result).toMatchObject({ incomeCents: 100000, expenseCents: 25000, netCents: 75000, rigidCents: 30000, savingsRate: 75 });
+  });
 });

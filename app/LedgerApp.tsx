@@ -6,19 +6,25 @@ import {
 } from "recharts";
 import {
   ArrowDownLeft, ArrowRightLeft, ArrowUpRight, BarChart3, Bell, BriefcaseBusiness, CalendarDays, Check,
-  ChevronRight, CircleDollarSign, Download, FileUp, Home, Landmark, Menu, Moon, MoreHorizontal, Plus,
+  CalendarClock, ChevronLeft, ChevronRight, CircleDollarSign, Download, FileUp, Home, Landmark, Menu, Moon, MoreHorizontal, Plus,
   ReceiptText, RotateCcw, Search, Settings, ShieldCheck, Sun, Trash2, WalletCards, X, Zap, LogOut, RefreshCw,
 } from "lucide-react";
-import { db, exportBackup, exportTransactionsCsv, importBackup, initializeDatabase, loadSnapshot, queueLocalChange, resetDatabase } from "@/lib/db";
+import { db, exportBackup, exportTransactionsCsv, getDeviceId, importBackup, initializeDatabase, loadSnapshot, queueLocalChange, resetDatabase } from "@/lib/db";
 import {
   calculateAccountBalances, calculateSafetyLine, calculateSalarySnapshot, calculateWeeklyBudget, currentAvailable,
-  dailyConsumptionTrend, forecastCashflow, monthlyCategorySpendingTrend, salaryExpectedPayments, simulatePurchase, summarizeInstallments, toLocalDate, weeklySpent,
+  addDays, dailyConsumptionTrend, forecastCashflow, monthBounds, monthlyCategorySpendingTrend, monthlyFinanceSummary,
+  recurringOccurrences, salaryExpectedPayments, simulatePurchase, summarizeInstallments, toLocalDate, weekBounds, weeklySpent,
 } from "@/lib/calculations";
-import type { Cents, LedgerSnapshot, LedgerTransaction, LocalDate, TransactionType } from "@/lib/types";
+import type { Attendance, Cents, LedgerSnapshot, LedgerTransaction, LocalDate, TransactionType } from "@/lib/types";
 import { asCents, formatMoney, uid } from "@/lib/types";
+import { previewTransactionCsv } from "@/lib/csv-import";
+import {
+  attendanceStatusLabel, confirmSalarySettlement, ensureLegacySalarySettlements, setAttendanceStatus, setSalaryEndDate,
+} from "@/lib/salary";
 import { SyncStatusGlyph, useCloudSync } from "./CloudSyncProvider";
+import { PlanningView } from "./PlanningView";
 
-type View = "home" | "transactions" | "add" | "budget" | "salary" | "installments" | "calendar" | "analytics" | "accounts" | "settings";
+type View = "home" | "transactions" | "add" | "budget" | "salary" | "installments" | "planning" | "calendar" | "analytics" | "accounts" | "settings";
 const TODAY = toLocalDate(new Date());
 const typeLabels: Record<TransactionType, string> = {
   expense: "支出", income: "收入", transfer: "转账", refund: "退款", loan_out: "借出", loan_repayment: "收回",
@@ -68,13 +74,13 @@ export function LedgerApp() {
   if (loading) return <div className="boot"><div className="brand-mark">青</div><h1>青蓝账本</h1><p>正在打开你的本地账本…</p></div>;
   if (error || !data || !metrics) return <div className="boot error"><h1>账本暂时无法打开</h1><p>{error}</p><button onClick={() => refresh()}>重新加载</button></div>;
 
-  const title: Record<View, string> = { home: "现金流总览", transactions: "交易流水", add: editing ? "编辑记录" : "记一笔", budget: "每周预算", salary: "工资与应收", installments: "分期管理", calendar: "现金流日历", analytics: "统计分析", accounts: "账户管理", settings: "设置与备份" };
+  const title: Record<View, string> = { home: "现金流总览", transactions: "交易流水", add: editing ? "编辑记录" : "记一笔", budget: "预算管理", salary: "工资与应收", installments: "分期管理", planning: "财务计划", calendar: "现金流日历", analytics: "统计分析", accounts: "账户与对账", settings: "设置与备份" };
 
   return <div className="app-shell">
     <Sidebar view={view} navigate={navigate} />
     <main className="main">
       <header className="topbar">
-        <div><p className="eyebrow">2026 学生现金流计划</p><h1>{title[view]}</h1></div>
+        <div><p className="eyebrow">{TODAY.slice(0, 4)} 个人现金流计划</p><h1>{title[view]}</h1></div>
         <div className="top-actions"><SyncStatusGlyph /><button className="icon-btn" aria-label="切换主题" onClick={() => void changeTheme(theme === "light" ? "dark" : "light")}>{theme === "light" ? <Moon /> : <Sun />}</button><button className="avatar account-avatar" onClick={() => navigate("settings")}>{cloud.user?.photoURL ? <img src={cloud.user.photoURL} alt={cloud.user.displayName || "账号头像"} /> : "青"}</button></div>
       </header>
       {view === "home" && <Dashboard data={data} metrics={metrics} navigate={navigate} />}
@@ -83,8 +89,9 @@ export function LedgerApp() {
       {view === "budget" && <BudgetView data={data} metrics={metrics} onRefresh={refresh} setToast={setToast} />}
       {view === "salary" && <SalaryView data={data} metrics={metrics} onRefresh={refresh} setToast={setToast} />}
       {view === "installments" && <InstallmentsView data={data} metrics={metrics} onRefresh={refresh} setToast={setToast} />}
+      {view === "planning" && <PlanningView data={data} onRefresh={refresh} setToast={setToast} />}
       {view === "calendar" && <CalendarView data={data} metrics={metrics} />}
-      {view === "analytics" && <AnalyticsView data={data} />}
+      {view === "analytics" && <AnalyticsView data={data} setToast={setToast} />}
       {view === "accounts" && <AccountsView data={data} metrics={metrics} onRefresh={refresh} setToast={setToast} />}
       {view === "settings" && <SettingsView data={data} theme={theme} setTheme={(next) => void changeTheme(next)} onRefresh={refresh} setToast={setToast} />}
     </main>
@@ -97,7 +104,7 @@ function deriveMetrics(data: LedgerSnapshot) {
   const balance = currentAvailable(data.accounts, data.transactions);
   const balances = calculateAccountBalances(data.accounts, data.transactions);
   const salary = calculateSalarySnapshot(data.salaryPlans, data.attendance, data.transactions, TODAY);
-  const safety = calculateSafetyLine(data.reserves, data.installmentItems, data.budget, TODAY);
+  const safety = calculateSafetyLine(data.reserves, data.installmentItems, data.budget, TODAY, data.financialGoals);
   const expectedIncome = data.salaryPlans.flatMap((p) => salaryExpectedPayments(p, data.attendance));
   const nextIncome = expectedIncome.find((x) => x.date >= TODAY);
   const spent = weeklySpent(data.transactions, TODAY, data.budget.weekStartsOn);
@@ -108,7 +115,7 @@ function deriveMetrics(data: LedgerSnapshot) {
 
 const navItems: { id: View; label: string; icon: typeof Home }[] = [
   { id: "home", label: "首页", icon: Home }, { id: "transactions", label: "账单", icon: ReceiptText }, { id: "budget", label: "预算", icon: ShieldCheck },
-  { id: "salary", label: "工资", icon: BriefcaseBusiness }, { id: "installments", label: "分期", icon: CalendarDays }, { id: "calendar", label: "日历", icon: CalendarDays },
+  { id: "salary", label: "工资", icon: BriefcaseBusiness }, { id: "installments", label: "分期", icon: CalendarDays }, { id: "planning", label: "计划", icon: CalendarClock }, { id: "calendar", label: "日历", icon: CalendarDays },
   { id: "analytics", label: "统计", icon: BarChart3 }, { id: "accounts", label: "账户", icon: Landmark }, { id: "settings", label: "设置", icon: Settings },
 ];
 function Sidebar({ view, navigate }: { view: View; navigate: (view: View) => void }) {
@@ -121,6 +128,7 @@ function MobileNav({ view, navigate }: { view: View; navigate: (view: View) => v
   const moreItems = [
     { id: "salary" as View, label: "工资与应收", icon: BriefcaseBusiness },
     { id: "installments" as View, label: "分期管理", icon: CalendarDays },
+    { id: "planning" as View, label: "财务计划", icon: CalendarClock },
     { id: "calendar" as View, label: "现金流日历", icon: CalendarDays },
     { id: "analytics" as View, label: "统计分析", icon: BarChart3 },
     { id: "accounts" as View, label: "账户管理", icon: Landmark },
@@ -148,7 +156,13 @@ function MobileNav({ view, navigate }: { view: View; navigate: (view: View) => v
 }
 
 function Dashboard({ data, metrics: m, navigate }: { data: LedgerSnapshot; metrics: ReturnType<typeof deriveMetrics>; navigate: (v: View) => void }) {
-  const forecastDates = ["2026-08-15", "2026-08-19", "2026-09-01", "2026-09-15", data.budget.customForecastDate].filter((v, i, a) => a.indexOf(v) === i) as LocalDate[];
+  const forecastDates = [
+    ...m.expectedIncome.map((item) => item.date),
+    ...data.installmentItems.filter((item) => item.status === "unpaid").map((item) => item.dueDate),
+    addDays(TODAY, 30),
+    data.budget.schoolDate,
+    data.budget.customForecastDate,
+  ].filter((date, index, all) => date >= TODAY && all.indexOf(date) === index).sort().slice(0, 5) as LocalDate[];
   const safetyState = m.gap > 0 ? "已低于安全线" : m.free < 35000 ? "接近警戒线" : m.free < 70000 ? "需要控制" : "安全";
   return <div className="page-stack">
     <section className="hero-card">
@@ -167,7 +181,7 @@ function Dashboard({ data, metrics: m, navigate }: { data: LedgerSnapshot; metri
       <Card title="安全资金构成" action="管理设置" onAction={() => navigate("settings")}><div className="reserve-list">{data.reserves.map((r) => <div key={r.id}><span><i className={`dot ${r.kind}`} />{r.name}</span><strong>{formatMoney(r.amountCents)}</strong></div>)}<div><span><i className="dot installment" />近期分期</span><strong>{formatMoney(m.safety.installmentCents)}</strong></div></div></Card>
       <Card title="最近现金流" action="全部流水" onAction={() => navigate("transactions")}><TransactionList items={data.transactions.slice(0, 4)} data={data} compact /></Card>
     </section>
-    <Card title="未来资金预测" action="现金流日历" onAction={() => navigate("calendar")}><div className="forecast-table"><div className="forecast-head"><span>日期</span><span>保守余额</span><span>工资按期到账</span><span>自由资金</span></div>{forecastDates.map((date) => { const conservative = forecastCashflow({ targetDate: date, asOf: TODAY, currentBalanceCents: m.balance, expectedIncome: m.expectedIncome, installments: data.installmentItems, plannedTransactions: data.transactions, includeExpectedIncome: false }); const expected = forecastCashflow({ targetDate: date, asOf: TODAY, currentBalanceCents: m.balance, expectedIncome: m.expectedIncome, installments: data.installmentItems, plannedTransactions: data.transactions, includeExpectedIncome: true }); return <div className="forecast-row" key={date}><span>{date.slice(5).replace("-", "月")}日</span><strong>{formatMoney(conservative.balanceCents)}</strong><strong>{formatMoney(expected.balanceCents)}</strong><span className={expected.balanceCents - m.safety.totalCents < 0 ? "negative" : "positive"}>{formatMoney(Math.max(0, expected.balanceCents - m.safety.totalCents))}</span></div>; })}</div></Card>
+    <Card title="未来资金预测" action="现金流日历" onAction={() => navigate("calendar")}><div className="forecast-table"><div className="forecast-head"><span>日期</span><span>保守余额</span><span>工资按期到账</span><span>自由资金</span></div>{forecastDates.map((date) => { const conservative = forecastCashflow({ targetDate: date, asOf: TODAY, currentBalanceCents: m.balance, expectedIncome: m.expectedIncome, installments: data.installmentItems, plannedTransactions: data.transactions, recurringRules: data.recurringRules, includeExpectedIncome: false }); const expected = forecastCashflow({ targetDate: date, asOf: TODAY, currentBalanceCents: m.balance, expectedIncome: m.expectedIncome, installments: data.installmentItems, plannedTransactions: data.transactions, recurringRules: data.recurringRules, includeExpectedIncome: true }); return <div className="forecast-row" key={date}><span>{date.slice(5).replace("-", "月")}日</span><strong>{formatMoney(conservative.balanceCents)}</strong><strong>{formatMoney(expected.balanceCents)}</strong><span className={expected.balanceCents - m.safety.totalCents < 0 ? "negative" : "positive"}>{formatMoney(Math.max(0, expected.balanceCents - m.safety.totalCents))}</span></div>; })}</div></Card>
   </div>;
 }
 function MetricCard({ icon, label, value, sub, tone }: { icon: React.ReactNode; label: string; value: string; sub: string; tone: string }) { return <article className={`metric-card ${tone}`}><div className="metric-icon">{icon}</div><div><span>{label}</span><strong>{value}</strong><small>{sub}</small></div></article>; }
@@ -209,32 +223,91 @@ function QuickEntry({ data, editing, onDone, onCancel }: { data: LedgerSnapshot;
 function BudgetView({ data, metrics: m, onRefresh, setToast }: { data: LedgerSnapshot; metrics: ReturnType<typeof deriveMetrics>; onRefresh: () => Promise<void>; setToast: (s: string) => void }) {
   const [amount, setAmount] = useState("100"); const simulation = simulatePurchase(asCents(Number(amount) || 0), m.balance, m.safety.totalCents, m.weekly.remainingCents, m.installments.next?.amountCents ?? 0);
   const saveCap = async (value: string) => { const cents = asCents(Number(value)); if (cents < 0) return; await db.budgets.update("main", { weeklyCapCents: cents }); await queueLocalChange("budgets", "main"); await onRefresh(); setToast("预算上限已更新"); };
-  return <div className="page-stack"><section className="budget-hero"><div><p>本周安全预算</p><h2>{formatMoney(m.weekly.budgetCents)}</h2><span>已花 {formatMoney(m.weekly.spentCents)}，还剩 {formatMoney(m.weekly.remainingCents)}</span></div><div className="budget-edit"><label>每周上限<input type="number" defaultValue={data.budget.weeklyCapCents / 100} onBlur={(e) => saveCap(e.target.value)} /></label><small>自动建议不会超过此金额</small></div></section><div className="content-grid"><Card title="预算执行"><BudgetMini weekly={m.weekly} /><div className="category-bars">{Object.entries(data.budget.categoryLimits).map(([name, limit], index) => { const spent = data.transactions.filter((t) => t.countsTowardBudget && data.categories.find((c) => c.id === t.categoryId)?.name === name).reduce((s, t) => s + t.amountCents, 0); return <div key={name}><div><span>{name}</span><strong>{formatMoney(spent)} / {formatMoney(limit)}</strong></div><div className="progress thin"><i style={{ width: `${Math.min(100, spent / limit * 100)}%`, background: palette[index % palette.length] }} /></div></div>; })}</div></Card><Card title="消费前先算一算"><label className="sim-input">计划消费金额<div><b>¥</b><input inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} /></div></label><div className={`recommendation ${simulation.recommended ? "yes" : "no"}`}><strong>{simulation.recommended ? "现金流允许购买" : "建议暂缓购买"}</strong><span>{simulation.safetyGapCents > 0 ? `消费后将低于安全线 ${formatMoney(simulation.safetyGapCents)}` : "消费后不会跌破安全线"}</span></div><div className="simulation-grid"><div><span>本周剩余</span><strong>{formatMoney(simulation.afterWeeklyCents)}</strong></div><div><span>账户余额</span><strong>{formatMoney(simulation.afterBalanceCents)}</strong></div><div><span>分期覆盖</span><strong>{simulation.installmentCovered ? "可以覆盖" : "存在风险"}</strong></div></div></Card></div></div>;
+  const period = data.budget.budgetPeriod ?? "weekly";
+  const periodBounds = period === "monthly" ? monthBounds(TODAY.slice(0, 7)) : period === "custom"
+    ? { start: data.budget.customBudgetStart ?? TODAY, end: data.budget.customBudgetEnd ?? TODAY }
+    : weekBounds(TODAY, data.budget.weekStartsOn);
+  const saveBudgetPeriod = async (value: "weekly" | "monthly" | "custom") => {
+    await db.budgets.update("main", { budgetPeriod: value });
+    await queueLocalChange("budgets", "main");
+    await onRefresh();
+  };
+  const saveCategoryLimit = async (name: string, value: string) => {
+    const limit = Math.max(0, asCents(Number(value)));
+    await db.budgets.update("main", { categoryLimits: { ...data.budget.categoryLimits, [name]: limit } });
+    await queueLocalChange("budgets", "main");
+    await onRefresh();
+    setToast(`${name}预算已更新`);
+  };
+  return <div className="page-stack"><section className="budget-hero"><div><p>本周安全预算</p><h2>{formatMoney(m.weekly.budgetCents)}</h2><span>已花 {formatMoney(m.weekly.spentCents)}，还剩 {formatMoney(m.weekly.remainingCents)}</span></div><div className="budget-edit"><label>每周上限<input type="number" defaultValue={data.budget.weeklyCapCents / 100} onBlur={(event) => saveCap(event.target.value)} /></label><small>自动建议不会超过此金额</small></div></section><div className="budget-period"><label>分类预算周期<select value={period} onChange={(event) => saveBudgetPeriod(event.target.value as typeof period)}><option value="weekly">本周</option><option value="monthly">本月</option><option value="custom">自定义</option></select></label>{period === "custom" && <><input type="date" value={data.budget.customBudgetStart ?? TODAY} onChange={async (event) => { await db.budgets.update("main", { customBudgetStart: event.target.value as LocalDate }); await queueLocalChange("budgets", "main"); await onRefresh(); }} /><input type="date" value={data.budget.customBudgetEnd ?? TODAY} onChange={async (event) => { await db.budgets.update("main", { customBudgetEnd: event.target.value as LocalDate }); await queueLocalChange("budgets", "main"); await onRefresh(); }} /></>}</div><div className="content-grid"><Card title="预算执行"><BudgetMini weekly={m.weekly} /><div className="category-bars editable">{Object.entries(data.budget.categoryLimits).map(([name, limit], index) => {
+    const matchingCategoryIds = new Set(data.categories.filter((category) => {
+      const parent = data.categories.find((candidate) => candidate.id === category.parentId);
+      return category.name === name || parent?.name === name;
+    }).map((category) => category.id));
+    const spent = data.transactions.filter((transaction) => transaction.status === "posted" && transaction.countsTowardBudget && transaction.date >= periodBounds.start && transaction.date <= periodBounds.end && matchingCategoryIds.has(transaction.categoryId ?? "")).reduce((sum, transaction) => sum + (transaction.type === "refund" ? -transaction.amountCents : transaction.amountCents), 0);
+    const percent = limit ? Math.max(0, Math.round(spent / limit * 100)) : 0;
+    return <div key={name} className={percent >= 100 ? "over" : percent >= 90 ? "danger-near" : percent >= 70 ? "warning-near" : ""}><div><span>{name}<small>{percent >= 100 ? "已超支" : percent >= 90 ? "接近上限" : percent >= 70 ? "需要注意" : ""}</small></span><label><strong>{formatMoney(spent)} /</strong><input type="number" defaultValue={limit / 100} onBlur={(event) => saveCategoryLimit(name, event.target.value)} /></label></div><div className="progress thin"><i style={{ width: `${Math.min(100, percent)}%`, background: palette[index % palette.length] }} /></div></div>;
+  })}</div></Card><Card title="消费前先算一算"><label className="sim-input">计划消费金额<div><b>¥</b><input inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} /></div></label><div className={`recommendation ${simulation.recommended ? "yes" : "no"}`}><strong>{simulation.recommended ? "现金流允许购买" : "建议暂缓购买"}</strong><span>{simulation.safetyGapCents > 0 ? `消费后将低于安全线 ${formatMoney(simulation.safetyGapCents)}` : "消费后不会跌破安全线"}</span></div><div className="simulation-grid"><div><span>本周剩余</span><strong>{formatMoney(simulation.afterWeeklyCents)}</strong></div><div><span>账户余额</span><strong>{formatMoney(simulation.afterBalanceCents)}</strong></div><div><span>分期覆盖</span><strong>{simulation.installmentCovered ? "可以覆盖" : "存在风险"}</strong></div></div></Card></div></div>;
 }
 
 function SalaryView({ data, metrics: m, onRefresh, setToast }: { data: LedgerSnapshot; metrics: ReturnType<typeof deriveMetrics>; onRefresh: () => Promise<void>; setToast: (s: string) => void }) {
   const plan = data.salaryPlans[0]; const expected = plan ? salaryExpectedPayments(plan, data.attendance) : [];
   const [confirmingPaid, setConfirmingPaid] = useState(false);
   const [pendingUndo, setPendingUndo] = useState<string | null>(null);
-  const latestManualPayment = data.transactions
-    .filter((transaction) => transaction.type === "salary_payment" && transaction.status === "posted" && transaction.note === "手动确认工资到账")
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-  const toggle = async (id: string, worked: boolean) => { await db.attendance.update(id, { status: worked ? "worked" : "off", earnedCents: worked ? plan.dailyRateCents : 0 }); await queueLocalChange("attendance", id); await onRefresh(); };
+  const latestSettlement = data.salarySettlements.filter((item) => item.planId === plan?.id).sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+  useEffect(() => {
+    if (!plan) return;
+    void ensureLegacySalarySettlements(plan, data.attendance, data.transactions, data.salarySettlements)
+      .then(async (changed) => { if (changed) await onRefresh(); });
+  }, [plan?.id]);
+  if (!plan) return <Empty text="请先创建工资计划" />;
+  const changeAttendance = async (id: string, status: Attendance["status"]) => {
+    await setAttendanceStatus(plan, id, status);
+    await onRefresh();
+    setToast("考勤和工资已自动重算");
+  };
   const confirmPaid = async () => {
     if (!m.salary.receivableCents) return;
     if (!confirmingPaid) { setConfirmingPaid(true); setToast("请再次点击，确认工资确实已到账"); return; }
-    const id = uid("salary");
-    await db.transactions.add({ id, type: "salary_payment", status: "posted", amountCents: m.salary.receivableCents, date: TODAY, time: new Date().toTimeString().slice(0, 5), accountId: data.accounts[0].id, categoryId: "income-工资-暑假工工资", merchant: plan.employer, note: "手动确认工资到账", countsTowardBudget: false, rigid: false, reimbursable: false, tags: ["工资"], attachmentIds: [], affectsBalance: true, createdAt: new Date().toISOString() });
-    await queueLocalChange("transactions", id); setConfirmingPaid(false); await onRefresh(); setToast("工资已转为到账收入");
+    const settlement = await confirmSalarySettlement(
+      plan,
+      data.attendance,
+      data.salarySettlements,
+      data.accounts.find((account) => !account.hidden)?.id ?? data.accounts[0].id,
+      data.categories.find((category) => category.id === "income-工资-暑假工工资")?.id,
+      TODAY,
+    );
+    setConfirmingPaid(false);
+    await onRefresh();
+    setToast(settlement ? "工资已结算到账，后续考勤修改会自动联动" : "没有新的已出勤工资可结算");
   };
   const undoPayment = async () => {
-    if (!latestManualPayment) return;
-    if (pendingUndo !== latestManualPayment.id) { setPendingUndo(latestManualPayment.id); setToast("请再次点击，确认撤销这笔工资到账"); return; }
-    await db.transactions.delete(latestManualPayment.id);
-    await queueLocalChange("transactions", latestManualPayment.id, "delete");
+    if (!latestSettlement) return;
+    if (pendingUndo !== latestSettlement.id) { setPendingUndo(latestSettlement.id); setToast("请再次点击，确认撤销这笔工资到账"); return; }
+    await db.transaction("rw", [db.transactions, db.salarySettlements], async () => {
+      await db.transactions.delete(latestSettlement.transactionId);
+      await db.salarySettlements.delete(latestSettlement.id);
+    });
+    await queueLocalChange("transactions", latestSettlement.transactionId, "delete");
+    await queueLocalChange("salarySettlements", latestSettlement.id, "delete");
     setPendingUndo(null); await onRefresh(); setToast("已撤销工资到账，应收与余额已恢复");
   };
-  return <div className="page-stack"><section className="salary-cards"><MetricCard icon={<BriefcaseBusiness />} label="累计已赚" value={formatMoney(m.salary.earnedCents)} sub="按实际出勤计算" tone="blue" /><MetricCard icon={<Bell />} label="尚未到账" value={formatMoney(m.salary.receivableCents)} sub="不计入可消费余额" tone="violet" /><MetricCard icon={<CalendarDays />} label="未来预计工资" value={formatMoney(m.salary.futureCents)} sub={`计划至 ${plan?.endDate}`} tone="green" /></section><div className="content-grid"><Card title="工资计划"><div className="plan-details"><div><span>工作</span><strong>{plan.employer}</strong></div><div><span>工作期间</span><strong>{plan.startDate} — {plan.endDate}</strong></div><div><span>日薪</span><strong>{formatMoney(plan.dailyRateCents)}</strong></div><div><span>结算规则</span><strong>每月 {plan.cutoffDay} 日截止，{plan.payDay} 日发薪</strong></div></div><button className={`primary full ${confirmingPaid ? "confirming" : ""}`} disabled={!m.salary.receivableCents} onClick={confirmPaid}><Check />{confirmingPaid ? "再次点击确认到账" : "确认应收工资已到账"}</button>{latestManualPayment && <div className="salary-undo"><div><span>最近一次手动确认</span><strong>{latestManualPayment.date} · {formatMoney(latestManualPayment.amountCents)}</strong></div><button className={pendingUndo === latestManualPayment.id ? "danger solid" : "danger"} onClick={undoPayment}><RotateCcw />{pendingUndo === latestManualPayment.id ? "再次点击撤销" : "撤销到账"}</button></div>}</Card><Card title="预计发薪批次"><div className="timeline">{expected.map((item) => <div key={item.date}><i /><div><strong>{item.date}</strong><span>预计到账</span></div><b>{formatMoney(item.amountCents)}</b></div>)}</div></Card></div><Card title="每日考勤"><div className="attendance-grid">{data.attendance.map((item) => <button key={item.id} className={item.status === "worked" ? "worked" : "off"} onClick={() => toggle(item.id, item.status !== "worked")}><span>{item.date.slice(5)}</span><strong>{item.status === "worked" ? "出勤" : "休息"}</strong><small>{formatMoney(item.earnedCents)}</small></button>)}</div></Card></div>;
+  return <div className="page-stack">
+    <section className="salary-cards"><MetricCard icon={<BriefcaseBusiness />} label="累计已赚" value={formatMoney(m.salary.earnedCents)} sub="只计算确认出勤" tone="blue" /><MetricCard icon={<Bell />} label="尚未到账" value={formatMoney(m.salary.receivableCents)} sub="不计入可消费余额" tone="violet" /><MetricCard icon={<CalendarDays />} label="未来预计工资" value={formatMoney(m.salary.futureCents)} sub={`计划至 ${plan.endDate}`} tone="green" /></section>
+    <div className="content-grid">
+      <Card title="工资计划"><div className="plan-details"><div><span>工作</span><strong>{plan.employer}</strong></div><div><span>开始日期</span><strong>{plan.startDate}</strong></div><div><span>日薪</span><strong>{formatMoney(plan.dailyRateCents)}</strong></div><div><span>结算规则</span><strong>每月 {plan.cutoffDay} 日截止，{plan.payDay} 日发薪</strong></div></div><label className="end-date-control"><span>最后工作日（包含当天）</span><input type="date" min={plan.startDate} value={plan.endDate} onChange={async (event) => {
+        try {
+          await setSalaryEndDate(plan, event.target.value as LocalDate);
+          await onRefresh();
+          setToast("最后工作日已更新，后续工资已自动调整");
+        } catch (reason) {
+          setToast(reason instanceof Error ? reason.message : "日期修改失败");
+        }
+      }} /></label><button className={`primary full ${confirmingPaid ? "confirming" : ""}`} disabled={!m.salary.receivableCents} onClick={confirmPaid}><Check />{confirmingPaid ? "再次点击确认到账" : "确认应收工资已到账"}</button>{latestSettlement && <div className="salary-undo"><div><span>最近工资结算</span><strong>{latestSettlement.periodEnd} · {formatMoney(latestSettlement.amountCents)}</strong></div><button className={pendingUndo === latestSettlement.id ? "danger solid" : "danger"} onClick={undoPayment}><RotateCcw />{pendingUndo === latestSettlement.id ? "再次点击撤销" : "撤销到账"}</button></div>}</Card>
+      <Card title="预计发薪批次"><div className="timeline">{expected.map((item) => <div key={item.date}><i /><div><strong>{item.date}</strong><span>预计到账</span></div><b>{formatMoney(item.amountCents)}</b></div>)}</div>{data.salaryAdjustments.length > 0 && <div className="salary-audit"><strong>最近自动调整</strong>{data.salaryAdjustments.slice(0, 3).map((item) => <span key={item.id}>{item.reason}：{formatMoney(item.previousAmountCents)} → {formatMoney(item.nextAmountCents)}</span>)}</div>}</Card>
+    </div>
+    <Card title="每日考勤"><p className="chart-note">可以随时修改任意一天。待确认、休息、请假和未在职均不计工资；修改已结算日期会同步调整到账流水和账户余额。</p><div className="attendance-grid editable">{data.attendance.filter((item) => item.planId === plan.id).map((item) => <div key={item.id} className={item.status}><span>{item.date.slice(5)}</span><strong>{attendanceStatusLabel(item.status)}</strong><small>{formatMoney(item.earnedCents)}</small><select aria-label={`${item.date}考勤状态`} value={item.status} disabled={item.date > plan.endDate} onChange={(event) => changeAttendance(item.id, event.target.value as Attendance["status"])}><option value="worked">出勤</option><option value="off">休息</option><option value="leave">请假</option><option value="pending">待确认</option>{item.date > plan.endDate && <option value="not_employed">未在职</option>}</select></div>)}</div></Card>
+  </div>;
 }
 
 function InstallmentsView({ data, metrics: m, onRefresh, setToast }: { data: LedgerSnapshot; metrics: ReturnType<typeof deriveMetrics>; onRefresh: () => Promise<void>; setToast: (s: string) => void }) {
@@ -243,51 +316,231 @@ function InstallmentsView({ data, metrics: m, onRefresh, setToast }: { data: Led
 }
 
 function CalendarView({ data, metrics: m }: { data: LedgerSnapshot; metrics: ReturnType<typeof deriveMetrics> }) {
-  const [selected, setSelected] = useState<LocalDate>("2026-08-15"); const monthStart = "2026-08-01" as LocalDate; const firstDay = new Date(2026, 7, 1).getDay(); const days = Array.from({ length: 31 }, (_, i) => `2026-08-${String(i + 1).padStart(2, "0")}` as LocalDate);
-  const eventsFor = (date: LocalDate) => ({ income: m.expectedIncome.filter((x) => x.date === date).reduce((s, x) => s + x.amountCents, 0), installment: data.installmentItems.filter((i) => i.dueDate === date && i.status === "unpaid").reduce((s, i) => s + i.amountCents, 0), transactions: data.transactions.filter((t) => t.date === date) });
-  const selectedEvents = eventsFor(selected); const forecast = forecastCashflow({ targetDate: selected, asOf: TODAY, currentBalanceCents: m.balance, expectedIncome: m.expectedIncome, installments: data.installmentItems, plannedTransactions: data.transactions, includeExpectedIncome: true });
-  return <div className="calendar-layout"><Card title="2026 年 8 月"><div className="calendar-week"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div><div className="calendar-grid">{Array.from({ length: firstDay }).map((_, i) => <i key={`blank-${i}`} />)}{days.map((date) => { const events = eventsFor(date); return <button className={selected === date ? "selected" : ""} key={date} onClick={() => setSelected(date)}><strong>{Number(date.slice(-2))}</strong><span>{events.income > 0 && <i className="event-in" />}{events.installment > 0 && <i className="event-out" />}</span><small>{events.income ? `+${Math.round(events.income / 100)}` : events.installment ? `-${Math.round(events.installment / 100)}` : ""}</small></button>; })}</div></Card><aside className="day-panel"><p>{selected}</p><h2>预计余额</h2><strong>{formatMoney(forecast.balanceCents)}</strong><div><span>预计到账</span><b className="positive">+{formatMoney(selectedEvents.income)}</b></div><div><span>分期到期</span><b className="negative">−{formatMoney(selectedEvents.installment)}</b></div><div><span>预计自由资金</span><b>{formatMoney(Math.max(0, forecast.balanceCents - m.safety.totalCents))}</b></div><Insight icon={<CalendarDays />} text="蓝点代表预计收入，橙点代表分期或刚性支出。预测不会修改实际余额。" /></aside></div>;
+  const [month, setMonth] = useState(TODAY.slice(0, 7));
+  const [selected, setSelected] = useState<LocalDate>(TODAY);
+  const bounds = monthBounds(month);
+  const [year, monthNumber] = month.split("-").map(Number);
+  const firstDay = new Date(year, monthNumber - 1, 1, 12).getDay();
+  const dayCount = Number(bounds.end.slice(-2));
+  const days = Array.from({ length: dayCount }, (_, index) => `${month}-${String(index + 1).padStart(2, "0")}` as LocalDate);
+  const moveMonth = (offset: number) => {
+    const date = new Date(year, monthNumber - 1 + offset, 1, 12);
+    const nextMonth = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+    setMonth(nextMonth);
+    setSelected(`${nextMonth}-01` as LocalDate);
+  };
+  const eventsFor = (date: LocalDate) => {
+    const recurring = data.recurringRules.filter((rule) => recurringOccurrences(rule, date, date).length > 0);
+    return {
+      income: m.expectedIncome.filter((item) => item.date === date).reduce((sum, item) => sum + item.amountCents, 0)
+        + recurring.filter((rule) => rule.type === "income").reduce((sum, rule) => sum + rule.amountCents, 0),
+      installment: data.installmentItems.filter((item) => item.dueDate === date && item.status === "unpaid").reduce((sum, item) => sum + item.amountCents, 0),
+      recurringExpense: recurring.filter((rule) => rule.type === "expense").reduce((sum, rule) => sum + rule.amountCents, 0),
+      recurring,
+      transactions: data.transactions.filter((transaction) => transaction.date === date),
+    };
+  };
+  const selectedEvents = eventsFor(selected);
+  const forecast = forecastCashflow({ targetDate: selected, asOf: TODAY, currentBalanceCents: m.balance, expectedIncome: m.expectedIncome, installments: data.installmentItems, plannedTransactions: data.transactions, recurringRules: data.recurringRules, includeExpectedIncome: true });
+  return <div className="calendar-layout"><section className="card"><div className="calendar-title"><button aria-label="上个月" onClick={() => moveMonth(-1)}><ChevronLeft /></button><h2>{year} 年 {monthNumber} 月</h2><button aria-label="下个月" onClick={() => moveMonth(1)}><ChevronRight /></button></div><div className="calendar-week"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div><div className="calendar-grid">{Array.from({ length: firstDay }).map((_, index) => <i key={`blank-${index}`} />)}{days.map((date) => { const events = eventsFor(date); const expense = events.installment + events.recurringExpense; return <button className={`${selected === date ? "selected" : ""} ${date === TODAY ? "today" : ""}`} key={date} onClick={() => setSelected(date)}><strong>{Number(date.slice(-2))}</strong><span>{events.income > 0 && <i className="event-in" />}{expense > 0 && <i className="event-out" />}</span><small>{events.income ? `+${Math.round(events.income / 100)}` : expense ? `-${Math.round(expense / 100)}` : ""}</small></button>; })}</div></section><aside className="day-panel"><p>{selected}</p><h2>{selected >= TODAY ? "预计余额" : "当前账本余额"}</h2><strong>{formatMoney(forecast.balanceCents)}</strong><div><span>预计到账</span><b className="positive">+{formatMoney(selectedEvents.income)}</b></div><div><span>分期到期</span><b className="negative">−{formatMoney(selectedEvents.installment)}</b></div><div><span>周期支出</span><b className="negative">−{formatMoney(selectedEvents.recurringExpense)}</b></div><div><span>预计自由资金</span><b>{formatMoney(Math.max(0, forecast.balanceCents - m.safety.totalCents))}</b></div>{selectedEvents.recurring.map((rule) => <small key={rule.id} className="calendar-event-label">{rule.name} · {formatMoney(rule.amountCents)}</small>)}<Insight icon={<CalendarDays />} text="日历会随当前月份自动推进；计划项目只影响预测，确认执行后才修改真实余额。" /></aside></div>;
 }
 
-function AnalyticsView({ data }: { data: LedgerSnapshot }) {
-  const monthPrefix = TODAY.slice(0, 7);
-  const posted = data.transactions.filter((t) => t.status === "posted" && t.affectsBalance && t.type !== "transfer" && t.date.startsWith(monthPrefix));
-  const grossExpense = posted.filter((t) => ["expense", "installment_payment"].includes(t.type)).reduce((s, t) => s + t.amountCents, 0);
-  const refunds = posted.filter((t) => t.type === "refund").reduce((s, t) => s + t.amountCents, 0);
-  const expense = Math.max(0, grossExpense - refunds);
-  const income = posted.filter((t) => ["income", "salary_payment"].includes(t.type)).reduce((s, t) => s + t.amountCents, 0);
-  const categoryTrend = monthlyCategorySpendingTrend(data.transactions, data.categories, TODAY);
+function AnalyticsView({ data, setToast }: { data: LedgerSnapshot; setToast: (message: string) => void }) {
+  const [monthPrefix, setMonthPrefix] = useState(TODAY.slice(0, 7));
+  const [closedAt, setClosedAt] = useState<string | null>(null);
+  const bounds = monthBounds(monthPrefix);
+  const selectedMonthDate = new Date(Number(monthPrefix.slice(0, 4)), Number(monthPrefix.slice(5)) - 2, 1, 12);
+  const previousMonth = `${selectedMonthDate.getFullYear()}-${String(selectedMonthDate.getMonth() + 1).padStart(2, "0")}`;
+  const summary = monthlyFinanceSummary(data.transactions, monthPrefix);
+  const previousSummary = monthlyFinanceSummary(data.transactions, previousMonth);
+  const categoryTrend = monthlyCategorySpendingTrend(data.transactions, data.categories, bounds.end);
   const categoryLines = categoryTrend.days.map(({ date, amounts }) => ({ date, ...Object.fromEntries(Object.entries(amounts).map(([id, cents]) => [id, cents / 100])) }));
   const pie = categoryTrend.series.map((series) => ({ name: series.name, value: series.totalCents / 100 }));
   const trend = Array.from({ length: Math.ceil(categoryTrend.days.length / 7) }, (_, index) => ({ name: `第${index + 1}周`, 支出: 0 }));
   categoryTrend.days.forEach((day, index) => { trend[Math.floor(index / 7)].支出 += Object.values(day.amounts).reduce((sum, cents) => sum + cents, 0) / 100; });
-  const dailyTrend = dailyConsumptionTrend(data.transactions, TODAY, 30).map((item) => ({ date: item.date, 消费: item.amountCents / 100 }));
-  const elapsedDays = Math.max(1, Number(TODAY.slice(-2)));
-  return <div className="page-stack"><section className="analytics-metrics"><div><span>本月收入</span><strong className="positive">{formatMoney(income)}</strong></div><div><span>本月支出</span><strong className="negative">{formatMoney(expense)}</strong></div><div><span>净结余</span><strong>{formatMoney(income - expense)}</strong></div><div><span>本月日均消费</span><strong>{formatMoney(Math.round(expense / elapsedDays))}</strong></div></section><Card title="近30天每日消费"><div className="chart daily-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={dailyTrend} margin={{ top: 8, right: 12, left: 0, bottom: 4 }}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="date" tickFormatter={(value) => String(value).slice(5).replace("-", "/")} minTickGap={24} /><YAxis tickFormatter={(value) => `¥${value}`} width={52} /><Tooltip labelFormatter={(label) => String(label)} formatter={(value) => [`¥${Number(value).toFixed(2)}`, "消费"]} /><Line type="monotone" dataKey="消费" stroke="#20b8c4" strokeWidth={3} dot={false} activeDot={{ r: 5, fill: "#3b82f6", stroke: "#dffcff", strokeWidth: 2 }} /></LineChart></ResponsiveContainer></div><p className="chart-note">按本机日期统计最近 30 个自然日；退款会冲减退款当天消费，最低显示为 ¥0。</p></Card><Card title={`${categoryTrend.month.replace("-", " 年 ")} 月 · 分类每日支出`}>{categoryTrend.series.length ? <><div className="category-line-legend">{categoryTrend.series.map((series, index) => <div key={series.id}><i style={{ background: palette[index % palette.length] }} /><span>{series.name}</span><strong>{formatMoney(series.totalCents)}</strong></div>)}</div><div className="chart category-line-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={categoryLines} margin={{ top: 10, right: 12, left: 0, bottom: 4 }}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="date" tickFormatter={(value) => String(value).slice(-2)} minTickGap={22} /><YAxis tickFormatter={(value) => `¥${value}`} width={52} /><Tooltip labelFormatter={(label) => `${String(label).slice(5).replace("-", "月")}日`} formatter={(value, name) => [`¥${Number(value).toFixed(2)}`, categoryTrend.series.find((series) => series.id === name)?.name ?? name]} />{categoryTrend.series.map((series, index) => <Line key={series.id} type="linear" dataKey={series.id} name={series.id} stroke={palette[index % palette.length]} strokeWidth={2.4} dot={false} activeDot={{ r: 4 }} />)}</LineChart></ResponsiveContainer></div><p className="chart-note">以自然月为一个周期，每种支出分类显示为一条独立直线；上方图例同时显示本月分类合计。</p></> : <Empty text="本月记录支出后会显示分类折线" />}</Card><div className="content-grid"><Card title="本月每周消费趋势"><div className="chart"><ResponsiveContainer width="100%" height="100%"><AreaChart data={trend}><defs><linearGradient id="trend" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="#22a6b3" stopOpacity={0.5}/><stop offset="100%" stopColor="#22a6b3" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="name" /><YAxis /><Tooltip formatter={(value) => [`¥${Number(value).toFixed(2)}`, "支出"]} /><Area dataKey="支出" stroke="#138697" fill="url(#trend)" /></AreaChart></ResponsiveContainer></div></Card><Card title="本月分类支出占比">{pie.length ? <div className="chart pie"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={pie} dataKey="value" nameKey="name" innerRadius={55} outerRadius={85}>{pie.map((_, index) => <Cell key={index} fill={palette[index % palette.length]} />)}</Pie><Tooltip formatter={(v) => `¥${Number(v).toFixed(2)}`} /></PieChart></ResponsiveContainer></div> : <Empty text="本月记录支出后会在这里生成图表" />}</Card></div></div>;
+  const dailyTrend = dailyConsumptionTrend(data.transactions, bounds.end, Number(bounds.end.slice(-2))).map((item) => ({ date: item.date, 消费: item.amountCents / 100 }));
+  const elapsedDays = monthPrefix === TODAY.slice(0, 7) ? Math.max(1, Number(TODAY.slice(-2))) : Number(bounds.end.slice(-2));
+  const expenseChange = summary.expenseCents - previousSummary.expenseCents;
+  useEffect(() => {
+    void db.settings.get(`monthClose:${monthPrefix}`).then((setting) => {
+      const value = setting?.value as { closedAt?: string } | undefined;
+      setClosedAt(value?.closedAt ?? null);
+    });
+  }, [monthPrefix]);
+  const closeMonth = async () => {
+    const closedAtValue = new Date().toISOString();
+    await db.settings.put({ key: `monthClose:${monthPrefix}`, value: { ...summary, closedAt: closedAtValue } });
+    await queueLocalChange("settings", `monthClose:${monthPrefix}`);
+    setClosedAt(closedAtValue);
+    setToast(`${monthPrefix} 月度结账快照已保存`);
+  };
+  return <div className="page-stack">
+    <div className="analytics-period"><div><strong>月度财务报告</strong><span>{closedAt ? `已结账：${new Date(closedAt).toLocaleString("zh-CN")}` : "收入、支出、储蓄率和分类变化"}</span></div><div className="analytics-period-actions"><input type="month" value={monthPrefix} max={TODAY.slice(0, 7)} onChange={(event) => setMonthPrefix(event.target.value)} /><button onClick={closeMonth}><Check />{closedAt ? "更新结账" : "保存结账"}</button></div></div>
+    <section className="analytics-metrics"><div><span>本月收入</span><strong className="positive">{formatMoney(summary.incomeCents)}</strong></div><div><span>本月支出</span><strong className="negative">{formatMoney(summary.expenseCents)}</strong></div><div><span>净结余</span><strong>{formatMoney(summary.netCents)}</strong></div><div><span>储蓄率</span><strong>{summary.savingsRate}%</strong></div></section>
+    <section className="monthly-insights"><div><span>日均消费</span><strong>{formatMoney(Math.round(summary.expenseCents / elapsedDays))}</strong></div><div><span>刚性支出占比</span><strong>{summary.expenseCents ? Math.round(summary.rigidCents / summary.expenseCents * 100) : 0}%</strong></div><div><span>较上月支出</span><strong className={expenseChange > 0 ? "negative" : "positive"}>{expenseChange > 0 ? "+" : ""}{formatMoney(expenseChange)}</strong></div></section>
+    <Card title={`${monthPrefix.replace("-", " 年 ")} 月 · 每日消费`}><div className="chart daily-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={dailyTrend} margin={{ top: 8, right: 12, left: 0, bottom: 4 }}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="date" tickFormatter={(value) => String(value).slice(5).replace("-", "/")} minTickGap={24} /><YAxis tickFormatter={(value) => `¥${value}`} width={52} /><Tooltip labelFormatter={(label) => String(label)} formatter={(value) => [`¥${Number(value).toFixed(2)}`, "消费"]} /><Line type="monotone" dataKey="消费" stroke="#20b8c4" strokeWidth={3} dot={false} activeDot={{ r: 5, fill: "#3b82f6", stroke: "#dffcff", strokeWidth: 2 }} /></LineChart></ResponsiveContainer></div></Card>
+    <Card title={`${categoryTrend.month.replace("-", " 年 ")} 月 · 分类每日支出`}>{categoryTrend.series.length ? <><div className="category-line-legend">{categoryTrend.series.map((series, index) => <div key={series.id}><i style={{ background: palette[index % palette.length] }} /><span>{series.name}</span><strong>{formatMoney(series.totalCents)}</strong></div>)}</div><div className="chart category-line-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={categoryLines} margin={{ top: 10, right: 12, left: 0, bottom: 4 }}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="date" tickFormatter={(value) => String(value).slice(-2)} minTickGap={22} /><YAxis tickFormatter={(value) => `¥${value}`} width={52} /><Tooltip labelFormatter={(label) => `${String(label).slice(5).replace("-", "月")}日`} formatter={(value, name) => [`¥${Number(value).toFixed(2)}`, categoryTrend.series.find((series) => series.id === name)?.name ?? name]} />{categoryTrend.series.map((series, index) => <Line key={series.id} type="linear" dataKey={series.id} name={series.id} stroke={palette[index % palette.length]} strokeWidth={2.4} dot={false} activeDot={{ r: 4 }} />)}</LineChart></ResponsiveContainer></div></> : <Empty text="该月记录支出后会显示分类折线" />}</Card>
+    <div className="content-grid"><Card title="每周消费趋势"><div className="chart"><ResponsiveContainer width="100%" height="100%"><AreaChart data={trend}><defs><linearGradient id="trend" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="#22a6b3" stopOpacity={0.5}/><stop offset="100%" stopColor="#22a6b3" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="name" /><YAxis /><Tooltip formatter={(value) => [`¥${Number(value).toFixed(2)}`, "支出"]} /><Area dataKey="支出" stroke="#138697" fill="url(#trend)" /></AreaChart></ResponsiveContainer></div></Card><Card title="分类支出占比">{pie.length ? <div className="chart pie"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={pie} dataKey="value" nameKey="name" innerRadius={55} outerRadius={85}>{pie.map((_, index) => <Cell key={index} fill={palette[index % palette.length]} />)}</Pie><Tooltip formatter={(value) => `¥${Number(value).toFixed(2)}`} /></PieChart></ResponsiveContainer></div> : <Empty text="该月还没有支出" />}</Card></div>
+  </div>;
 }
 
 function AccountsView({ data, metrics: m, onRefresh, setToast }: { data: LedgerSnapshot; metrics: ReturnType<typeof deriveMetrics>; onRefresh: () => Promise<void>; setToast: (s: string) => void }) {
   const [name, setName] = useState(""); const [balance, setBalance] = useState("");
   const add = async () => { if (!name.trim()) return; const id = uid("acc"); await db.accounts.add({ id, name: name.trim(), icon: "WalletCards", openingBalanceCents: asCents(Number(balance) || 0), balanceAsOf: TODAY, hidden: false, sort: data.accounts.length + 1 }); await queueLocalChange("accounts", id); setName(""); setBalance(""); await onRefresh(); setToast("账户已添加"); };
-  const adjust = async (id: string, current: Cents) => { const value = window.prompt("输入新的余额快照（元）", String(current / 100)); if (value === null) return; const cents = asCents(Number(value)); if (!Number.isFinite(cents)) { setToast("金额格式无效"); return; } await db.accounts.update(id, { openingBalanceCents: cents, balanceAsOf: TODAY }); await queueLocalChange("accounts", id); await onRefresh(); setToast("账户余额快照已调整"); };
-  return <div className="page-stack"><section className="account-total"><span>全部账户余额</span><strong>{formatMoney(m.balance)}</strong><small>{data.accounts.filter((a) => !a.hidden).length} 个可见账户</small></section><div className="account-grid">{data.accounts.map((account) => <article key={account.id}><div className="account-icon"><WalletCards /></div><div><span>{account.name}</span><strong>{formatMoney(m.balances[account.id] ?? 0)}</strong><small>余额基准日 {account.balanceAsOf}</small></div><div className="account-actions"><button onClick={() => adjust(account.id, m.balances[account.id] ?? 0)}>调整</button><button onClick={async () => { await db.accounts.update(account.id, { hidden: !account.hidden }); await queueLocalChange("accounts", account.id); await onRefresh(); }}>{account.hidden ? "显示" : "隐藏"}</button></div></article>)}</div><Card title="新增账户"><div className="inline-form"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="账户名称" /><input inputMode="decimal" value={balance} onChange={(e) => setBalance(e.target.value)} placeholder="当前余额" /><button className="primary" onClick={add}><Plus />添加账户</button></div></Card></div>;
+  const reconcile = async (id: string, current: Cents) => {
+    const value = window.prompt("输入微信、支付宝或银行卡显示的真实余额（元）", String(current / 100));
+    if (value === null) return;
+    const actualBalanceCents = asCents(Number(value));
+    if (!Number.isFinite(actualBalanceCents)) { setToast("金额格式无效"); return; }
+    const differenceCents = actualBalanceCents - current;
+    const snapshotId = uid("reconciliation");
+    const transactionId = differenceCents === 0 ? undefined : uid("adjustment");
+    await db.transaction("rw", [db.reconciliations, db.transactions], async () => {
+      await db.reconciliations.add({
+        id: snapshotId,
+        accountId: id,
+        date: TODAY,
+        bookBalanceCents: current,
+        actualBalanceCents,
+        differenceCents,
+        adjustmentTransactionId: transactionId,
+        createdAt: new Date().toISOString(),
+      });
+      if (transactionId) await db.transactions.add({
+        id: transactionId,
+        type: "adjustment",
+        status: "posted",
+        amountCents: Math.abs(differenceCents),
+        date: TODAY,
+        time: new Date().toTimeString().slice(0, 5),
+        accountId: id,
+        note: "账户对账差额调整",
+        countsTowardBudget: false,
+        rigid: false,
+        reimbursable: false,
+        tags: ["对账"],
+        attachmentIds: [],
+        adjustmentDirection: differenceCents >= 0 ? "in" : "out",
+        affectsBalance: true,
+        createdAt: new Date().toISOString(),
+      });
+    });
+    await queueLocalChange("reconciliations", snapshotId);
+    if (transactionId) await queueLocalChange("transactions", transactionId);
+    await onRefresh();
+    setToast(differenceCents === 0 ? "对账一致，已保存快照" : `已生成差额调整 ${formatMoney(differenceCents)}`);
+  };
+  return <div className="page-stack"><section className="account-total"><span>全部账户余额</span><strong>{formatMoney(m.balance)}</strong><small>{data.accounts.filter((account) => !account.hidden).length} 个可见账户</small></section><div className="account-grid">{data.accounts.map((account) => <article key={account.id}><div className="account-icon"><WalletCards /></div><div><span>{account.name}</span><strong>{formatMoney(m.balances[account.id] ?? 0)}</strong><small>余额基准日 {account.balanceAsOf}</small></div><div className="account-actions"><button onClick={() => reconcile(account.id, m.balances[account.id] ?? 0)}>对账</button><button onClick={async () => { await db.accounts.update(account.id, { hidden: !account.hidden }); await queueLocalChange("accounts", account.id); await onRefresh(); }}>{account.hidden ? "显示" : "隐藏"}</button></div></article>)}</div>{data.reconciliations.length > 0 && <Card title="最近对账记录"><div className="reconciliation-list">{data.reconciliations.slice(0, 6).map((item) => <div key={item.id}><span><strong>{data.accounts.find((account) => account.id === item.accountId)?.name}</strong><small>{item.date} · 账本 {formatMoney(item.bookBalanceCents)} / 实际 {formatMoney(item.actualBalanceCents)}</small></span><b className={item.differenceCents === 0 ? "positive" : "negative"}>{item.differenceCents === 0 ? "一致" : formatMoney(item.differenceCents)}</b></div>)}</div></Card>}<Card title="新增账户"><div className="inline-form"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="账户名称" /><input inputMode="decimal" value={balance} onChange={(event) => setBalance(event.target.value)} placeholder="当前余额" /><button className="primary" onClick={add}><Plus />添加账户</button></div></Card></div>;
 }
 
 function SettingsView({ data, theme, setTheme, onRefresh, setToast }: { data: LedgerSnapshot; theme: string; setTheme: (t: "light" | "dark") => void; onRefresh: () => Promise<void>; setToast: (s: string) => void }) {
   const cloud = useCloudSync();
   const [clearText, setClearText] = useState(""); const [importInfo, setImportInfo] = useState<{ text: string; accounts: number; transactions: number } | null>(null);
+  const [csvInfo, setCsvInfo] = useState<{ fileName: string; preview: ReturnType<typeof previewTransactionCsv> } | null>(null);
   const exportJson = async () => downloadText(`青蓝账本-${TODAY}.json`, await exportBackup(), "application/json");
-  const previewImport = async (file?: File) => { if (!file) return; const text = await file.text(); try { const value = JSON.parse(text); if (value.schemaVersion !== 1 || !Array.isArray(value.accounts) || !Array.isArray(value.transactions)) throw new Error(); setImportInfo({ text, accounts: value.accounts.length, transactions: value.transactions.length }); } catch { setToast("备份文件格式无效"); } };
+  const previewImport = async (file?: File) => { if (!file) return; const text = await file.text(); try { const value = JSON.parse(text); if (![1, 2].includes(value.schemaVersion) || !Array.isArray(value.accounts) || !Array.isArray(value.transactions)) throw new Error(); setImportInfo({ text, accounts: value.accounts.length, transactions: value.transactions.length }); } catch { setToast("备份文件格式无效"); } };
   const runImport = async (mode: "merge" | "replace") => { if (!importInfo) return; await importBackup(importInfo.text, mode); setImportInfo(null); await onRefresh(); setToast(mode === "merge" ? "备份已合并" : "备份已恢复"); };
+  const previewCsv = async (file?: File) => {
+    if (!file) return;
+    const bytes = await file.arrayBuffer();
+    let text = new TextDecoder("utf-8").decode(bytes);
+    if (text.includes("�")) {
+      try { text = new TextDecoder("gb18030").decode(bytes); } catch { /* 使用 UTF-8 结果 */ }
+    }
+    try {
+      setCsvInfo({ fileName: file.name, preview: previewTransactionCsv(text, file.name, data.transactions) });
+    } catch (reason) {
+      setToast(reason instanceof Error ? reason.message : "CSV账单无法识别");
+    }
+  };
+  const runCsvImport = async () => {
+    if (!csvInfo?.preview.rows.length) return;
+    const batchId = uid("import");
+    const accountName = { wechat: "微信", alipay: "支付宝", bank: "银行卡", generic: "" }[csvInfo.preview.source];
+    const account = data.accounts.find((item) => item.name.includes(accountName) && !item.hidden) ?? data.accounts.find((item) => !item.hidden);
+    if (!account) { setToast("请先创建可用账户"); return; }
+    const transactionIds: string[] = [];
+    const now = new Date().toISOString();
+    await db.transaction("rw", [db.transactions, db.importBatches], async () => {
+      for (const row of csvInfo.preview.rows) {
+        const categoryKind = row.type === "expense" ? "expense" : "income";
+        const category = data.categories.find((item) => item.kind === categoryKind && item.parentId && !item.archived);
+        const id = uid("tx");
+        transactionIds.push(id);
+        await db.transactions.add({
+          id,
+          type: row.type,
+          status: "posted",
+          amountCents: row.amountCents,
+          date: row.date,
+          time: row.time,
+          accountId: account.id,
+          categoryId: category?.id,
+          merchant: row.merchant,
+          note: row.note,
+          countsTowardBudget: row.type === "expense",
+          rigid: false,
+          reimbursable: false,
+          tags: ["账单导入", ...(row.orderId ? [`import-order:${row.orderId}`] : [])],
+          attachmentIds: [],
+          importBatchId: batchId,
+          affectsBalance: true,
+          createdAt: now,
+        });
+      }
+      await db.importBatches.add({
+        id: batchId,
+        source: csvInfo.preview.source,
+        fileName: csvInfo.fileName,
+        importedAt: now,
+        recordCount: transactionIds.length,
+        duplicateCount: csvInfo.preview.duplicateCount,
+        transactionIds,
+        status: "imported",
+      });
+    });
+    for (const id of transactionIds) await queueLocalChange("transactions", id);
+    await queueLocalChange("importBatches", batchId);
+    setCsvInfo(null);
+    await onRefresh();
+    setToast(`成功导入 ${transactionIds.length} 条，跳过 ${csvInfo.preview.duplicateCount} 条重复`);
+  };
+  const rollbackBatch = async (batchId: string) => {
+    const batch = data.importBatches.find((item) => item.id === batchId);
+    if (!batch || batch.status !== "imported") return;
+    await db.transaction("rw", [db.transactions, db.importBatches], async () => {
+      await db.transactions.bulkDelete(batch.transactionIds);
+      await db.importBatches.update(batch.id, { status: "reverted" });
+    });
+    for (const id of batch.transactionIds) await queueLocalChange("transactions", id, "delete");
+    await queueLocalChange("importBatches", batch.id);
+    await onRefresh();
+    setToast("该批账单已整批撤销");
+  };
   const queueBudget = async () => { await queueLocalChange("budgets", "main"); await onRefresh(); };
   const lastSync = cloud.state.lastSyncedAt ? new Date(cloud.state.lastSyncedAt).toLocaleString("zh-CN") : "尚未完成";
   return <div className="settings-grid">
     <section className="settings-section wide cloud-account-section"><h2>账号与云同步</h2>{cloud.configured && cloud.user ? <div className="cloud-account"><div className="cloud-profile">{cloud.user.photoURL ? <img src={cloud.user.photoURL} alt="账号头像" /> : <div className="profile-fallback">青</div>}<div><strong>{cloud.user.displayName || "统一账号用户"}</strong><span>{cloud.user.email}</span><small>最后同步：{lastSync}</small></div></div><div className="cloud-controls"><SyncStatusGlyph /><button onClick={() => void cloud.syncNow()}><RefreshCw />立即同步</button><button className="danger" onClick={() => void cloud.logout()}><LogOut />退出登录</button></div></div> : <div className="cloud-needed"><ShieldCheck /><div><strong>{cloud.configured ? "正在连接统一账号" : "当前为本地安全模式"}</strong><p>{cloud.configured ? "连接完成后会自动迁移本机旧账，并开始手机、电脑之间的增量同步。" : "云数据库暂时不可用；账目仍完整保存在 IndexedDB，恢复后会自动补传。"}</p></div></div>}</section>
     <section className="settings-section"><h2>预算与安全线</h2><SettingRow label="安全线范围" hint="决定哪些近期分期计入锁定资金"><select value={data.budget.safetyMode} onChange={async (e) => { await db.budgets.update("main", { safetyMode: e.target.value as typeof data.budget.safetyMode }); await queueBudget(); }}><option value="30d">未来30天</option><option value="60d">未来60天</option><option value="school">计算到开学</option><option value="custom">自定义金额</option></select></SettingRow><SettingRow label="每周结余" hint="决定结余是否滚入下周"><select value={data.budget.rolloverMode} onChange={async (e) => { await db.budgets.update("main", { rolloverMode: e.target.value as "rollover" | "reset" }); await queueBudget(); }}><option value="reset">每周清零</option><option value="rollover">结余滚存</option></select></SettingRow><SettingRow label="开学日期" hint="用于安全线和未来预测"><input type="date" value={data.budget.schoolDate} onChange={async (e) => { await db.budgets.update("main", { schoolDate: e.target.value as LocalDate }); await queueBudget(); }} /></SettingRow></section>
     <section className="settings-section"><h2>显示与隐私</h2><SettingRow label="界面主题" hint="登录后会同步到所有设备"><div className="theme-toggle"><button className={theme === "light" ? "active" : ""} onClick={() => setTheme("light")}><Sun />浅色</button><button className={theme === "dark" ? "active" : ""} onClick={() => setTheme("dark")}><Moon />深色</button></div></SettingRow><SettingRow label="本地缓存" hint="离线时仍可读写，联网后自动补传"><span className="local-badge"><ShieldCheck />IndexedDB 已启用</span></SettingRow></section>
-    <section className="settings-section wide"><h2>备份与恢复</h2><div className="backup-actions"><button onClick={exportJson}><Download />导出完整 JSON</button><button onClick={() => downloadText(`青蓝流水-${TODAY}.csv`, exportTransactionsCsv(data.transactions, data.accounts, data.categories), "text/csv;charset=utf-8")}><Download />导出流水 CSV</button><label className="button-label"><FileUp />导入 JSON<input type="file" accept="application/json" onChange={(e) => previewImport(e.target.files?.[0])} /></label></div>{importInfo && <div className="import-preview"><div><strong>导入预览</strong><span>{importInfo.accounts} 个账户 · {importInfo.transactions} 条流水</span><p>合并会按 ID 更新同名记录；覆盖会先清除当前账本。导入后的变化会进入增量同步队列。</p></div><button onClick={() => runImport("merge")}>合并导入</button><button className="danger" onClick={() => runImport("replace")}>覆盖恢复</button></div>}</section>
+    <DataSecurityCenter />
+    <section className="settings-section wide"><h2>备份、恢复与账单导入</h2><div className="backup-actions"><button onClick={exportJson}><Download />导出完整 JSON</button><button onClick={() => downloadText(`青蓝流水-${TODAY}.csv`, exportTransactionsCsv(data.transactions, data.accounts, data.categories), "text/csv;charset=utf-8")}><Download />导出流水 CSV</button><label className="button-label"><FileUp />导入 JSON<input type="file" accept="application/json" onChange={(event) => previewImport(event.target.files?.[0])} /></label><label className="button-label"><FileUp />导入微信/支付宝/银行卡 CSV<input type="file" accept=".csv,text/csv" onChange={(event) => previewCsv(event.target.files?.[0])} /></label></div>{importInfo && <div className="import-preview"><div><strong>备份导入预览</strong><span>{importInfo.accounts} 个账户 · {importInfo.transactions} 条流水</span><p>合并会按 ID 更新同名记录；覆盖会先清除当前账本。导入后的变化会进入增量同步队列。</p></div><button onClick={() => runImport("merge")}>合并导入</button><button className="danger" onClick={() => runImport("replace")}>覆盖恢复</button></div>}{csvInfo && <div className="import-preview"><div><strong>{csvInfo.preview.sourceLabel}预览</strong><span>可导入 {csvInfo.preview.rows.length} 条 · 重复 {csvInfo.preview.duplicateCount} 条 · 无效 {csvInfo.preview.skippedCount} 条</span><p>默认导入对应账户；导入后可逐条编辑，也可整批撤销。</p></div><button onClick={runCsvImport}>确认导入</button><button onClick={() => setCsvInfo(null)}>取消</button></div>}{data.importBatches.length > 0 && <div className="import-history">{data.importBatches.slice(0, 5).map((batch) => <div key={batch.id}><span><strong>{batch.fileName}</strong><small>{new Date(batch.importedAt).toLocaleString("zh-CN")} · {batch.recordCount} 条</small></span><b>{batch.status === "imported" ? "已导入" : "已撤销"}</b>{batch.status === "imported" && <button className="danger" onClick={() => rollbackBatch(batch.id)}>整批撤销</button>}</div>)}</div>}</section>
     <section className="settings-section wide danger-zone"><h2>危险操作</h2><p>输入“清空数据”后可恢复首次示例数据。登录状态下，删除与恢复结果也会同步到其他设备。</p><div className="inline-form"><input value={clearText} onChange={(e) => setClearText(e.target.value)} placeholder="输入：清空数据" /><button className="danger solid" disabled={clearText !== "清空数据"} onClick={async () => { await resetDatabase(); setClearText(""); await onRefresh(); setToast("已恢复示例数据并加入同步队列"); }}><RotateCcw />清空并恢复示例</button></div></section>
   </div>;
+}
+function DataSecurityCenter() {
+  const cloud = useCloudSync();
+  const [overview, setOverview] = useState<{ devices: Array<{ deviceId: string; userAgent: string | null; lastSeenAt: string }>; conflicts: Array<{ entityType: string; recordId: string; reason: string; archivedAt: string }> } | null>(null);
+  useEffect(() => {
+    if (!cloud.user || !cloud.online) return;
+    let active = true;
+    void fetch("/api/sync/security", { credentials: "same-origin", cache: "no-store" })
+      .then(async (response) => response.ok ? response.json() : null)
+      .then((value) => { if (active && value) setOverview(value); })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [cloud.user?.ownerId, cloud.online, cloud.state.lastSyncedAt]);
+  return <section className="settings-section wide"><h2>数据安全中心</h2><div className="security-grid"><div><span>当前设备</span><strong>{getDeviceId().slice(0, 12)}…</strong><small>云端近期识别 {overview?.devices.length ?? 1} 台设备</small></div><div><span>待同步记录</span><strong>{cloud.state.pendingCount}</strong><small>{cloud.online ? "联网后自动增量上传" : "当前离线，本机数据不会丢失"}</small></div><div><span>同步状态</span><strong>{cloud.state.status === "success" ? "正常" : cloud.state.status === "syncing" ? "同步中" : cloud.state.status === "offline" ? "离线" : "需要检查"}</strong><small>{cloud.state.error ?? `历史冲突 ${overview?.conflicts.length ?? 0} 条`}</small></div><div><span>独立备份</span><strong>建议每月导出</strong><small>云同步不能替代可下载的完整 JSON</small></div></div>{overview && <div className="security-details"><div><strong>最近设备</strong>{overview.devices.slice(0, 4).map((device) => <span key={device.deviceId}>{device.userAgent?.includes("Mobile") ? "移动设备" : "电脑/平板"} · {new Date(device.lastSeenAt).toLocaleString("zh-CN")}</span>)}</div><div><strong>同步冲突历史</strong>{overview.conflicts.length ? overview.conflicts.slice(0, 4).map((item) => <span key={`${item.entityType}-${item.recordId}-${item.archivedAt}`}>{item.entityType} · {item.reason} · {new Date(item.archivedAt).toLocaleString("zh-CN")}</span>) : <span>暂无冲突记录</span>}</div></div>}</section>;
 }
 function SettingRow({ label, hint, children }: { label: string; hint: string; children: React.ReactNode }) { return <div className="setting-row"><div><strong>{label}</strong><span>{hint}</span></div>{children}</div>; }
 function Empty({ text }: { text: string }) { return <div className="empty"><ReceiptText /><p>{text}</p></div>; }

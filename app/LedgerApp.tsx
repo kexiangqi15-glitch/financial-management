@@ -7,7 +7,7 @@ import {
 import {
   ArrowDownLeft, ArrowRightLeft, ArrowUpRight, BarChart3, Bell, BriefcaseBusiness, CalendarDays, Check,
   CalendarClock, ChevronLeft, ChevronRight, CircleDollarSign, Download, FileUp, Home, Landmark, Menu, Moon, MoreHorizontal, Plus,
-  ReceiptText, RotateCcw, Search, Settings, ShieldCheck, Sun, Trash2, WalletCards, X, Zap, LogOut, RefreshCw,
+  ReceiptText, RotateCcw, Search, Settings, ShieldAlert, ShieldCheck, Sparkles, Sun, Trash2, WalletCards, X, Zap, LogOut, RefreshCw,
 } from "lucide-react";
 import { db, exportBackup, exportTransactionsCsv, getDeviceId, importBackup, initializeDatabase, loadSnapshot, queueLocalChange, resetDatabase } from "@/lib/db";
 import {
@@ -18,6 +18,7 @@ import {
 import type { Attendance, Cents, LedgerSnapshot, LedgerTransaction, LocalDate, TransactionType } from "@/lib/types";
 import { asCents, formatMoney, uid } from "@/lib/types";
 import { previewTransactionCsv } from "@/lib/csv-import";
+import { buildAiAnalysisInput, isAiAnalysisResponse, type AiAnalysisResponse } from "@/lib/ai-analysis";
 import {
   attendanceStatusLabel, confirmSalarySettlement, ensureLegacySalarySettlements, setAttendanceStatus, setSalaryEndDate,
 } from "@/lib/salary";
@@ -348,6 +349,9 @@ function CalendarView({ data, metrics: m }: { data: LedgerSnapshot; metrics: Ret
 function AnalyticsView({ data, setToast }: { data: LedgerSnapshot; setToast: (message: string) => void }) {
   const [monthPrefix, setMonthPrefix] = useState(TODAY.slice(0, 7));
   const [closedAt, setClosedAt] = useState<string | null>(null);
+  const [aiResult, setAiResult] = useState<AiAnalysisResponse | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState("");
   const bounds = monthBounds(monthPrefix);
   const selectedMonthDate = new Date(Number(monthPrefix.slice(0, 4)), Number(monthPrefix.slice(5)) - 2, 1, 12);
   const previousMonth = `${selectedMonthDate.getFullYear()}-${String(selectedMonthDate.getMonth() + 1).padStart(2, "0")}`;
@@ -366,6 +370,11 @@ function AnalyticsView({ data, setToast }: { data: LedgerSnapshot; setToast: (me
       const value = setting?.value as { closedAt?: string } | undefined;
       setClosedAt(value?.closedAt ?? null);
     });
+    setAiError("");
+    setAiResult(null);
+    void db.settings.get(`aiAnalysis:${monthPrefix}`).then((setting) => {
+      if (isAiAnalysisResponse(setting?.value)) setAiResult(setting.value);
+    });
   }, [monthPrefix]);
   const closeMonth = async () => {
     const closedAtValue = new Date().toISOString();
@@ -374,10 +383,60 @@ function AnalyticsView({ data, setToast }: { data: LedgerSnapshot; setToast: (me
     setClosedAt(closedAtValue);
     setToast(`${monthPrefix} 月度结账快照已保存`);
   };
+  const runAiAnalysis = async () => {
+    setAiLoading(true);
+    setAiError("");
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 60_000);
+    try {
+      const response = await fetch("/api/ai/analyze", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ snapshot: buildAiAnalysisInput(data, monthPrefix, TODAY) }),
+        signal: controller.signal,
+      });
+      const value = await response.json() as unknown;
+      if (!response.ok) {
+        const message = value && typeof value === "object" && "error" in value && typeof value.error === "string"
+          ? value.error
+          : "AI 分析暂时不可用";
+        throw new Error(message);
+      }
+      if (!isAiAnalysisResponse(value)) throw new Error("AI 返回的分析格式无效");
+      await db.settings.put({ key: `aiAnalysis:${monthPrefix}`, value });
+      await queueLocalChange("settings", `aiAnalysis:${monthPrefix}`);
+      setAiResult(value);
+      setToast("AI 财务分析已生成");
+    } catch (reason) {
+      const message = reason instanceof DOMException && reason.name === "AbortError"
+        ? "AI 分析超时，请稍后重试"
+        : reason instanceof Error ? reason.message : "AI 分析暂时不可用";
+      setAiError(message);
+    } finally {
+      window.clearTimeout(timer);
+      setAiLoading(false);
+    }
+  };
+  const riskLabel = { low: "风险较低", medium: "需要关注", high: "风险较高" } as const;
+  const priorityLabel = { low: "可优化", medium: "建议处理", high: "优先处理" } as const;
   return <div className="page-stack">
     <div className="analytics-period"><div><strong>月度财务报告</strong><span>{closedAt ? `已结账：${new Date(closedAt).toLocaleString("zh-CN")}` : "收入、支出、储蓄率和分类变化"}</span></div><div className="analytics-period-actions"><input type="month" value={monthPrefix} max={TODAY.slice(0, 7)} onChange={(event) => setMonthPrefix(event.target.value)} /><button onClick={closeMonth}><Check />{closedAt ? "更新结账" : "保存结账"}</button></div></div>
     <section className="analytics-metrics"><div><span>本月收入</span><strong className="positive">{formatMoney(summary.incomeCents)}</strong></div><div><span>本月支出</span><strong className="negative">{formatMoney(summary.expenseCents)}</strong></div><div><span>净结余</span><strong>{formatMoney(summary.netCents)}</strong></div><div><span>储蓄率</span><strong>{summary.savingsRate}%</strong></div></section>
     <section className="monthly-insights"><div><span>日均消费</span><strong>{formatMoney(Math.round(summary.expenseCents / elapsedDays))}</strong></div><div><span>刚性支出占比</span><strong>{summary.expenseCents ? Math.round(summary.rigidCents / summary.expenseCents * 100) : 0}%</strong></div><div><span>较上月支出</span><strong className={expenseChange > 0 ? "negative" : "positive"}>{expenseChange > 0 ? "+" : ""}{formatMoney(expenseChange)}</strong></div></section>
+    <section className="ai-analysis-card">
+      <div className="ai-analysis-head"><div className="ai-analysis-title"><span><Sparkles /></span><div><strong>AI 财务分析</strong><small>分析现金安全、预算、工资、分期与储蓄目标</small></div></div><button onClick={() => void runAiAnalysis()} disabled={aiLoading}>{aiLoading ? <RefreshCw className="sync-spin" /> : <Sparkles />}{aiLoading ? "正在分析" : aiResult ? "重新分析" : "生成分析"}</button></div>
+      <p className="ai-privacy"><ShieldCheck />仅发送金额汇总、类别和日期；不会发送商户、备注、附件或账号邮箱。</p>
+      {aiLoading && <div className="ai-loading" role="status"><span /><span /><span /><p>AI 正在核对本月现金流和风险，请稍候…</p></div>}
+      {aiError && <div className="ai-error"><ShieldAlert /><div><strong>暂时无法生成分析</strong><span>{aiError}</span></div></div>}
+      {!aiLoading && !aiError && !aiResult && <div className="ai-empty"><Sparkles /><strong>让 AI 帮你读懂这个月</strong><span>它会基于账本中的真实汇总数字给出风险提示和下一步行动。</span></div>}
+      {!aiLoading && aiResult && <div className="ai-result">
+        <div className="ai-score"><div style={{ "--ai-score": `${aiResult.analysis.healthScore}%` } as React.CSSProperties}><strong>{aiResult.analysis.healthScore}</strong><span>财务健康分</span></div><section><i className={aiResult.analysis.riskLevel}>{riskLabel[aiResult.analysis.riskLevel]}</i><h3>{aiResult.analysis.headline}</h3><p>{aiResult.analysis.overview}</p></section></div>
+        <div className="ai-insight-grid">{aiResult.analysis.insights.map((insight, index) => <article key={`${insight.title}-${index}`} className={insight.priority}><header><span>{priorityLabel[insight.priority]}</span><strong>{insight.title}</strong></header><p>{insight.finding}</p><small>{insight.evidence}</small><b>{insight.action}</b></article>)}</div>
+        <div className="ai-next-actions"><strong>接下来优先做</strong><ol>{aiResult.analysis.nextActions.map((action, index) => <li key={`${action}-${index}`}>{action}</li>)}</ol></div>
+        <footer><span>生成于 {new Date(aiResult.generatedAt).toLocaleString("zh-CN")} · {aiResult.model}</span><span>AI 结果仅供个人财务管理参考，请以账本真实数据和实际情况为准。</span></footer>
+      </div>}
+    </section>
     <Card title={`${monthPrefix.replace("-", " 年 ")} 月 · 每日消费`}><div className="chart daily-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={dailyTrend} margin={{ top: 8, right: 12, left: 0, bottom: 4 }}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="date" tickFormatter={(value) => String(value).slice(5).replace("-", "/")} minTickGap={24} /><YAxis tickFormatter={(value) => `¥${value}`} width={52} /><Tooltip labelFormatter={(label) => String(label)} formatter={(value) => [`¥${Number(value).toFixed(2)}`, "消费"]} /><Line type="monotone" dataKey="消费" stroke="#20b8c4" strokeWidth={3} dot={false} activeDot={{ r: 5, fill: "#3b82f6", stroke: "#dffcff", strokeWidth: 2 }} /></LineChart></ResponsiveContainer></div></Card>
     <Card title={`${categoryTrend.month.replace("-", " 年 ")} 月 · 分类每日支出`}>{categoryTrend.series.length ? <><div className="category-line-legend">{categoryTrend.series.map((series, index) => <div key={series.id}><i style={{ background: palette[index % palette.length] }} /><span>{series.name}</span><strong>{formatMoney(series.totalCents)}</strong></div>)}</div><div className="chart category-line-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={categoryLines} margin={{ top: 10, right: 12, left: 0, bottom: 4 }}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="date" tickFormatter={(value) => String(value).slice(-2)} minTickGap={22} /><YAxis tickFormatter={(value) => `¥${value}`} width={52} /><Tooltip labelFormatter={(label) => `${String(label).slice(5).replace("-", "月")}日`} formatter={(value, name) => [`¥${Number(value).toFixed(2)}`, categoryTrend.series.find((series) => series.id === name)?.name ?? name]} />{categoryTrend.series.map((series, index) => <Line key={series.id} type="linear" dataKey={series.id} name={series.id} stroke={palette[index % palette.length]} strokeWidth={2.4} dot={false} activeDot={{ r: 4 }} />)}</LineChart></ResponsiveContainer></div></> : <Empty text="该月记录支出后会显示分类折线" />}</Card>
     <div className="content-grid"><Card title="每周消费趋势"><div className="chart"><ResponsiveContainer width="100%" height="100%"><AreaChart data={trend}><defs><linearGradient id="trend" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="#22a6b3" stopOpacity={0.5}/><stop offset="100%" stopColor="#22a6b3" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="name" /><YAxis /><Tooltip formatter={(value) => [`¥${Number(value).toFixed(2)}`, "支出"]} /><Area dataKey="支出" stroke="#138697" fill="url(#trend)" /></AreaChart></ResponsiveContainer></div></Card><Card title="分类支出占比">{pie.length ? <div className="chart pie"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={pie} dataKey="value" nameKey="name" innerRadius={55} outerRadius={85}>{pie.map((_, index) => <Cell key={index} fill={palette[index % palette.length]} />)}</Pie><Tooltip formatter={(value) => `¥${Number(value).toFixed(2)}`} /></PieChart></ResponsiveContainer></div> : <Empty text="该月还没有支出" />}</Card></div>

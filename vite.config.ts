@@ -1,7 +1,19 @@
+import { rmSync } from "node:fs";
 import { fileURLToPath, URL } from "node:url";
+import { resolve as resolvePath } from "node:path";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
 import { sites } from "./build/sites-vite-plugin";
+
+function stripServerSecrets(): Plugin {
+  return {
+    name: "strip-server-secrets",
+    apply: "build",
+    closeBundle() {
+      rmSync(resolvePath("dist/server/.dev.vars"), { force: true });
+    },
+  };
+}
 
 export default defineConfig(async ({ mode }) => {
   process.env.WRANGLER_WRITE_LOGS ??= "false";
@@ -14,7 +26,7 @@ export default defineConfig(async ({ mode }) => {
   }
 
   return {
-    plugins: [react(), sites(), ...deploymentPlugins],
+    plugins: [react(), sites(), ...deploymentPlugins, stripServerSecrets()],
     resolve: { alias: { "@": fileURLToPath(new URL(".", import.meta.url)) } },
     build: { target: "es2022", sourcemap: true },
     server: { port: 5173 },

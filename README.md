@@ -11,6 +11,7 @@
 - 财务计划：周期收支、储蓄目标、应收借款和报销均支持本地优先跨设备同步。
 - 账户对账：输入真实余额后保存对账快照，差额通过可审计的调整流水修正。
 - 月度报告：支持月份选择、环比、储蓄率、刚性支出比例、分类趋势和月度结账快照。
+- AI 财务分析：在统计页分析现金安全、预算、工资应收、分期压力和储蓄目标，并把报告跨设备同步。
 - 数据安全中心：显示当前设备、同步队列、近期设备和冲突历史。
 
 ## 这次同步方案
@@ -67,6 +68,8 @@
 - API 每次请求都在 Worker 内读取平台提供的已认证邮箱；浏览器无法指定别人的用户 ID。
 - 所有 D1 查询和 R2 路径都带服务端生成的 `owner_key`。
 - `/api/sync`、账号资料和附件响应均使用 `no-store`，Service Worker 明确不缓存 `/api/`。
+- OpenAI API Key 只保存在 Worker 的服务端环境变量中，不会进入浏览器代码、IndexedDB、备份或同步数据。
+- AI 分析只发送金额汇总、分类名称和日期，不发送商户、流水备注、附件、账号邮箱或完整交易明细；API 请求设置为不存储。
 - 前端没有数据库密钥、服务账号私钥或 OAuth Client Secret。
 - 应用页面可以公开访问，但业务 API 必须取得 Sites 统一账号身份；未登录访客不能读取任何账本数据。
 
@@ -79,7 +82,7 @@ pnpm install
 pnpm run dev
 ```
 
-纯本地 Vite 环境没有 Sites 注入的统一账号头和生产 D1/R2 绑定，因此会以 IndexedDB 本地安全模式运行。完整跨设备同步应在 Sites 生产站点验证。
+纯本地 Vite 环境没有 Sites 注入的统一账号头、生产 D1/R2 绑定和服务端 AI 密钥，因此会以 IndexedDB 本地安全模式运行。完整跨设备同步和 AI 分析应在 Sites 生产站点验证。
 
 ## 测试与构建
 
@@ -103,7 +106,7 @@ pnpm run build
 }
 ```
 
-构建会把配置与 `drizzle/` 迁移复制到 `dist/.openai/`。发布新版本时，Sites 为 Worker 绑定 D1/R2 并应用迁移。此同步实现依赖 Sites 的服务端身份头；若改部署到纯静态 GitHub Pages、Netlify 或 Vercel 静态托管，页面仍可离线使用，但必须另行提供兼容的身份代理和 `/api/sync` Worker 才能保留云同步，不能直接把身份头放到客户端伪造。
+构建会把配置与 `drizzle/` 迁移复制到 `dist/.openai/`。发布新版本时，Sites 为 Worker 绑定 D1/R2、注入服务端 `OPENAI_API_KEY` 并应用迁移。此同步和 AI 实现依赖 Sites 的服务端 Worker 与身份头；若改部署到纯静态 GitHub Pages、Netlify 或 Vercel 静态托管，页面仍可离线使用，但必须另行提供兼容的身份代理、`/api/sync` 和 `/api/ai/analyze` Worker，不能把身份头或 OpenAI 密钥放到客户端。
 
 ## 数据备份
 
@@ -118,6 +121,7 @@ pnpm run build
 - `lib/db.ts`：Dexie 数据库、增量队列与旧数据识别。
 - `lib/sync/engine.ts`：D1 增量同步、轮询、离线恢复、迁移和附件下载。
 - `lib/sync/core.ts`：LWW 与云数据序列化纯函数。
-- `worker/index.ts`：身份隔离、D1 API、R2 附件和冲突历史。
+- `lib/ai-analysis.ts`：隐私化财务汇总、AI 请求和结果校验。
+- `worker/index.ts`：身份隔离、D1 API、R2 附件、冲突历史和服务端 AI 分析。
 - `db/schema.ts` / `drizzle/`：云数据库模型与迁移。
 - `tests/`：财务、IndexedDB 和跨设备同步测试。

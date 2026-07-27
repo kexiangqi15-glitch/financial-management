@@ -96,6 +96,30 @@ export interface AiAnalysisResponse {
   model: string;
 }
 
+export async function parseAiAnalysisHttpResponse(response: Response): Promise<AiAnalysisResponse> {
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  let value: unknown = null;
+  if (contentType.includes("application/json")) {
+    try {
+      value = await response.json();
+    } catch {
+      throw new Error("AI 服务返回了无法识别的响应，请稍后重试");
+    }
+  }
+
+  if (!response.ok) {
+    const message = isRecord(value) && typeof value.error === "string"
+      ? value.error
+      : response.status === 429
+        ? "AI 服务额度不足或请求过于频繁"
+        : "AI 分析暂时不可用，请稍后重试";
+    throw new Error(message);
+  }
+
+  if (!isAiAnalysisResponse(value)) throw new Error("AI 返回的分析格式无效");
+  return value;
+}
+
 function previousMonth(month: string) {
   const [year, monthNumber] = month.split("-").map(Number);
   const date = new Date(year, monthNumber - 2, 1, 12);

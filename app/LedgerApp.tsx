@@ -18,7 +18,7 @@ import {
 import type { Attendance, Cents, LedgerSnapshot, LedgerTransaction, LocalDate, TransactionType } from "@/lib/types";
 import { asCents, formatMoney, uid } from "@/lib/types";
 import { previewTransactionCsv } from "@/lib/csv-import";
-import { buildAiAnalysisInput, isAiAnalysisResponse, type AiAnalysisResponse } from "@/lib/ai-analysis";
+import { buildAiAnalysisInput, isAiAnalysisResponse, parseAiAnalysisHttpResponse, type AiAnalysisResponse } from "@/lib/ai-analysis";
 import {
   attendanceStatusLabel, confirmSalarySettlement, ensureLegacySalarySettlements, setAttendanceStatus, setSalaryEndDate,
 } from "@/lib/salary";
@@ -396,14 +396,7 @@ function AnalyticsView({ data, setToast }: { data: LedgerSnapshot; setToast: (me
         body: JSON.stringify({ snapshot: buildAiAnalysisInput(data, monthPrefix, TODAY) }),
         signal: controller.signal,
       });
-      const value = await response.json() as unknown;
-      if (!response.ok) {
-        const message = value && typeof value === "object" && "error" in value && typeof value.error === "string"
-          ? value.error
-          : "AI 分析暂时不可用";
-        throw new Error(message);
-      }
-      if (!isAiAnalysisResponse(value)) throw new Error("AI 返回的分析格式无效");
+      const value = await parseAiAnalysisHttpResponse(response);
       await db.settings.put({ key: `aiAnalysis:${monthPrefix}`, value });
       await queueLocalChange("settings", `aiAnalysis:${monthPrefix}`);
       setAiResult(value);

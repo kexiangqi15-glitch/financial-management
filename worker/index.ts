@@ -53,7 +53,7 @@ export default {
       const identity = await authenticatedIdentity(request, env);
       if (isAiRoute) {
         if (request.method !== "POST") throw new HttpError(405, "AI 分析接口仅支持 POST");
-        return analyzeFinance(request, env, identity);
+        return await analyzeFinance(request, env, identity);
       }
 
       if (!env.DB) throw new HttpError(503, "云数据库尚未绑定，请稍后重试");
@@ -161,15 +161,20 @@ async function analyzeFinance(request: Request, env: Env, identity: Identity) {
     }),
   });
 
-  const providerBody = await providerResponse.json() as {
+  const providerBody = await providerResponse.json().catch(() => ({})) as {
     output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }>;
+    error?: { code?: string; type?: string };
   };
   if (!providerResponse.ok) {
     if (providerResponse.status === 401 || providerResponse.status === 403) {
       throw new HttpError(503, "AI 服务认证失败，请稍后重试");
     }
     if (providerResponse.status === 429) {
-      throw new HttpError(429, "AI 服务额度不足或请求过于频繁");
+      const errorCode = providerBody.error?.code ?? providerBody.error?.type;
+      if (errorCode === "billing_not_active" || errorCode === "insufficient_quota") {
+        throw new HttpError(429, "OpenAI API 计费尚未启用，请先在 API 平台添加付款方式或额度");
+      }
+      throw new HttpError(429, "AI 请求过于频繁，请稍后重试");
     }
     throw new HttpError(502, "AI 分析暂时不可用，请稍后重试");
   }

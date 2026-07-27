@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildAiAnalysisInput, isAiAnalysisInput, isAiAnalysisResponse } from "../lib/ai-analysis";
+import { buildAiAnalysisInput, isAiAnalysisInput, isAiAnalysisResponse, parseAiAnalysisHttpResponse } from "../lib/ai-analysis";
+import worker from "../worker/index";
 import {
   accounts,
   attendance,
@@ -124,5 +125,52 @@ describe("AI 财务分析隐私化数据", () => {
     };
     expect(isAiAnalysisResponse(response)).toBe(true);
     expect(isAiAnalysisResponse({ ...response, analysis: { ...response.analysis, healthScore: 101 } })).toBe(false);
+  });
+
+  it("把服务端 JSON 错误显示为可读中文", async () => {
+    const response = new Response(JSON.stringify({ error: "OpenAI API 计费尚未启用" }), {
+      status: 429,
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
+    await expect(parseAiAnalysisHttpResponse(response)).rejects.toThrow("OpenAI API 计费尚未启用");
+  });
+
+  it("遇到 HTML 错误页时不暴露 JSON 解析异常", async () => {
+    const response = new Response("<!DOCTYPE html><title>Service error</title>", {
+      status: 502,
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+    await expect(parseAiAnalysisHttpResponse(response)).rejects.toThrow("AI 分析暂时不可用，请稍后重试");
+  });
+
+  it("服务端把异步的计费错误转换为 JSON 响应", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      error: { code: "billing_not_active", type: "billing_not_active" },
+    }), {
+      status: 429,
+      headers: { "content-type": "application/json" },
+    });
+    try {
+      const request = new Request("https://qinglan.example/api/ai/analyze", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "oai-authenticated-user-email": "owner@example.com",
+        },
+        body: JSON.stringify({ snapshot: buildAiAnalysisInput(snapshot(), "2026-07", "2026-07-23") }),
+      });
+      const response = await worker.fetch(request, {
+        ASSETS: { fetch: async () => new Response("asset") },
+        OPENAI_API_KEY: "test-only-key",
+      });
+      expect(response.status).toBe(429);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      await expect(response.json()).resolves.toEqual({
+        error: "OpenAI API 计费尚未启用，请先在 API 平台添加付款方式或额度",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

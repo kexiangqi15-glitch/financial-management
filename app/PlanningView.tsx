@@ -274,10 +274,11 @@ export function PlanningView({
       </div>
       <div className="receivable-list">{data.receivables.map((item) => {
         const remaining = Math.max(0, item.totalCents - item.settledCents);
-        return <div key={item.id} className={item.status}>
+        const overdue = item.status === "open" && item.dueDate < TODAY;
+        return <div key={item.id} className={`${item.status} ${overdue ? "overdue" : ""}`}>
           <CircleDollarSign />
-          <span><strong>{item.name}</strong><small>{directionLabel(item.direction)} · {item.counterparty} · 到期 {item.dueDate}</small></span>
-          <b>{item.status === "settled" ? "已结清" : formatMoney(remaining)}</b>
+          <span><strong>{item.name}</strong><small>{directionLabel(item.direction)} · {item.counterparty} · 到期 {item.dueDate}{overdue ? " · 已逾期" : ""}</small></span>
+          <b>{item.status === "settled" ? "已结清" : overdue ? `逾期 ${formatMoney(remaining)}` : formatMoney(remaining)}</b>
           {item.status === "open" && <button onClick={() => settleReceivable(item)}>记录结算</button>}
         </div>;
       })}</div>

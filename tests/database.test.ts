@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import { beforeEach, describe, expect, it } from "vitest";
-import { db, exportBackup, exportTransactionsCsv, importBackup, initializeDatabase, listLegacyCustomizations, loadSnapshot, queueLocalChange, queuePristineSeedData, resetDatabase } from "../lib/db";
+import { db, exportBackup, exportMonthlyTransactionsCsv, exportTransactionsCsv, importBackup, initializeDatabase, listLegacyCustomizations, loadSnapshot, queueLocalChange, queuePristineSeedData, resetDatabase } from "../lib/db";
 
 describe("IndexedDB 持久化与备份", () => {
   beforeEach(async () => { await db.delete(); await db.open(); });
@@ -13,6 +13,29 @@ describe("IndexedDB 持久化与备份", () => {
     await initializeDatabase(); const snapshot = await loadSnapshot(); const backup = JSON.parse(await exportBackup());
     expect(backup.schemaVersion).toBe(2); expect(backup.transactions).toHaveLength(1);
     expect(exportTransactionsCsv(snapshot.transactions, snapshot.accounts, snapshot.categories)).toContain("\"日期\",\"时间\"");
+  });
+  it("月流水导出只包含选中月份，覆盖跨年、月首月末且不改变原数据", async () => {
+    await initializeDatabase(); const snapshot = await loadSnapshot();
+    const base = snapshot.transactions[0];
+    const rows = [
+      { ...base, id: "previous", date: "2025-12-31" as const, note: "上个月" },
+      { ...base, id: "last", date: "2026-01-31" as const, note: '月末,"测试"' },
+      { ...base, id: "first", date: "2026-01-01" as const, note: "月初" },
+      { ...base, id: "next", date: "2026-02-01" as const, note: "下个月" },
+    ];
+    const before = JSON.stringify(rows);
+    const csv = exportMonthlyTransactionsCsv(rows, snapshot.accounts, snapshot.categories, "2026-01");
+    expect(csv).toContain('"2026-01-01"'); expect(csv).toContain('"2026-01-31"');
+    expect(csv).not.toContain("上个月"); expect(csv).not.toContain("下个月");
+    expect(csv).toContain('"月末,""测试"""');
+    expect(csv.indexOf("月初")).toBeLessThan(csv.indexOf("月末"));
+    expect(JSON.stringify(rows)).toBe(before);
+  });
+  it("空月份只导出表头，无效月份不会导出全部账目", () => {
+    expect(exportMonthlyTransactionsCsv([], [], [], "2024-02").split("\n")).toHaveLength(1);
+    for (const month of ["", "2026-13", "2026-1", "2026-00"]) {
+      expect(() => exportMonthlyTransactionsCsv([], [], [], month)).toThrow("请选择有效月份");
+    }
   });
   it("清空后可恢复示例数据", async () => { await initializeDatabase(); await db.transactions.clear(); await resetDatabase(); expect((await loadSnapshot()).transactions).toHaveLength(1); });
   it("本地修改和删除会写入可重试的增量同步队列", async () => {

@@ -155,6 +155,14 @@ export function exportTransactionsCsv(transactions: LedgerTransaction[], account
   const rows = transactions.map((t) => [t.date, t.time, t.type, t.status, (t.amountCents / 100).toFixed(2), accounts.find((a) => a.id === t.accountId)?.name, categories.find((c) => c.id === t.categoryId)?.name, t.merchant, t.note, t.countsTowardBudget ? "是" : "否"]);
   return "\ufeff" + [["日期", "时间", "类型", "状态", "金额", "账户", "分类", "商家/来源", "备注", "计入周预算"], ...rows].map((row) => row.map(csvCell).join(",")).join("\n");
 }
+
+/** Export a complete monthly statement without changing or dropping audit rows. */
+export function exportMonthlyTransactionsCsv(transactions: LedgerTransaction[], accounts: Account[], categories: Category[], month: string) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("请选择有效月份");
+  const selected = transactions.filter((t) => t.date.slice(0, 7) === month)
+    .sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time) || a.id.localeCompare(b.id));
+  return exportTransactionsCsv(selected, accounts, categories);
+}
 function blobToDataUrl(blob: Blob): Promise<string> { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(reader.error); reader.readAsDataURL(blob); }); }
 function dataUrlToBlob(value: string) { const [header, body] = value.split(","); const type = /data:(.*?);/.exec(header)?.[1] ?? "application/octet-stream"; const binary = atob(body); const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0)); return new Blob([bytes], { type }); }
 

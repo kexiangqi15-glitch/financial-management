@@ -26,11 +26,13 @@ interface Env {
   OPENAI_MODEL?: string;
 }
 
-interface Identity { ownerKey: string; email: string; displayName: string | null }
-interface SyncRequestBody { deviceId?: unknown; sinceVersion?: unknown; push?: unknown }
+interface Identity { ownerKey: string; email: string; displayName: string | null; external?: boolean }
+interface SyncRequestBody { deviceId?: unknown; sinceVersion?: unknown; push?: unknown; code?: unknown }
 
 const API_PREFIX = "/api/sync";
 const AI_ANALYSIS_PATH = "/api/ai/analyze";
+const EXTERNAL_LINK_PATH = "/api/sync/external-link";
+const GITHUB_PAGES_ORIGIN = "https://kexiangqi15-glitch.github.io";
 const MAX_PUSH_ITEMS = 50;
 const MAX_RECORD_JSON_BYTES = 1_000_000;
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
@@ -47,13 +49,18 @@ export default {
     const isSyncRoute = url.pathname.startsWith(API_PREFIX);
     const isAiRoute = url.pathname === AI_ANALYSIS_PATH;
     if (!isSyncRoute && !isAiRoute) return env.ASSETS.fetch(request);
-    if (request.method === "OPTIONS") return new Response(null, { status: 204 });
+    if (request.method === "OPTIONS") return withExternalCors(new Response(null, { status: 204 }), request);
 
     try {
+      if (url.pathname === EXTERNAL_LINK_PATH && request.method === "POST") {
+        if (!env.DB) throw new HttpError(503, "云数据库尚未绑定，请稍后重试");
+        const identity = await platformIdentity(request, env);
+        return withExternalCors(await createExternalLink(request, env.DB, identity), request);
+      }
       const identity = await authenticatedIdentity(request, env);
       if (isAiRoute) {
         if (request.method !== "POST") throw new HttpError(405, "AI 分析接口仅支持 POST");
-        return await analyzeFinance(request, env, identity);
+        return withExternalCors(await analyzeFinance(request, env, identity), request);
       }
 
       if (!env.DB) throw new HttpError(503, "云数据库尚未绑定，请稍后重试");
@@ -61,28 +68,28 @@ export default {
       if (url.pathname === `${API_PREFIX}/profile` && request.method === "GET") {
         await touchUser(env.DB, identity, null, request.headers.get("user-agent"));
         const recordCount = await countRecords(env.DB, identity.ownerKey);
-        return json({ profile: publicProfile(identity), recordCount });
+        return withExternalCors(json({ profile: publicProfile(identity), recordCount }), request);
       }
 
       if (url.pathname === `${API_PREFIX}/security` && request.method === "GET") {
         await touchUser(env.DB, identity, null, request.headers.get("user-agent"));
-        return json(await securityOverview(env.DB, identity.ownerKey));
+        return withExternalCors(json(await securityOverview(env.DB, identity.ownerKey)), request);
       }
 
       if (url.pathname.startsWith(`${API_PREFIX}/attachments/`) && request.method === "GET") {
         if (!env.ATTACHMENTS) throw new HttpError(503, "云附件存储尚未绑定");
-        return downloadAttachment(request, env.DB, env.ATTACHMENTS, identity, url);
+        return withExternalCors(await downloadAttachment(request, env.DB, env.ATTACHMENTS, identity, url), request);
       }
 
       if (url.pathname === API_PREFIX && request.method === "POST") {
-        return synchronize(request, env, identity);
+        return withExternalCors(await synchronize(request, env, identity), request);
       }
 
       throw new HttpError(404, "接口不存在");
     } catch (reason) {
       const status = reason instanceof HttpError ? reason.status : 500;
       const message = reason instanceof Error ? reason.message : "云同步发生未知错误";
-      return json({ error: message }, status);
+      return withExternalCors(json({ error: message }, status), request);
     }
   },
 };
@@ -362,6 +369,21 @@ async function downloadAttachment(request: Request, db: D1Database, bucket: R2Bu
 }
 
 async function authenticatedIdentity(request: Request, env: Env): Promise<Identity> {
+  const syncCode = request.headers.get("x-qinglan-sync-code")?.trim();
+  if (syncCode) {
+    if (!env.DB) throw new HttpError(503, "云数据库尚未绑定，请稍后重试");
+    validateExternalSyncCode(syncCode);
+    const codeHash = await sha256(`qinglan-external-link:${syncCode}`);
+    const link = await env.DB.prepare(
+      "SELECT owner_key FROM sync_external_links WHERE code_hash = ? AND revoked_at IS NULL",
+    ).bind(codeHash).first<{ owner_key: string }>();
+    if (!link?.owner_key) throw new HttpError(401, "同步码无效或已失效");
+    return { ownerKey: link.owner_key, email: "同步码已连接", displayName: "GitHub Pages 账本", external: true };
+  }
+  return platformIdentity(request, env);
+}
+
+async function platformIdentity(request: Request, env: Env): Promise<Identity> {
   const url = new URL(request.url);
   const forwarded = request.headers.get("oai-authenticated-user-email");
   const localFallback = (url.hostname === "localhost" || url.hostname === "127.0.0.1") ? env.QINGLAN_DEV_USER_EMAIL : undefined;
@@ -373,6 +395,25 @@ async function authenticatedIdentity(request: Request, env: Env): Promise<Identi
     try { displayName = decodeURIComponent(encodedName).trim() || null; } catch { displayName = null; }
   }
   return { ownerKey: await sha256(email), email, displayName };
+}
+
+async function createExternalLink(request: Request, db: D1Database, identity: Identity) {
+  const body = await readJsonBody(request);
+  const code = requiredString(body.code, "同步码", 128).trim();
+  validateExternalSyncCode(code);
+  await touchUser(db, identity, null, request.headers.get("user-agent"));
+  const now = new Date().toISOString();
+  const codeHash = await sha256(`qinglan-external-link:${code}`);
+  await db.prepare(`
+    INSERT INTO sync_external_links (code_hash, owner_key, created_at, last_used_at, revoked_at)
+    VALUES (?, ?, ?, ?, NULL)
+    ON CONFLICT(code_hash) DO UPDATE SET owner_key = excluded.owner_key, last_used_at = excluded.last_used_at, revoked_at = NULL
+  `).bind(codeHash, identity.ownerKey, now, now).run();
+  return json({ linked: true });
+}
+
+function validateExternalSyncCode(code: string) {
+  if (!/^[a-f0-9]{48}$/i.test(code)) throw new HttpError(400, "同步码格式无效");
 }
 
 async function touchUser(db: D1Database, identity: Identity, deviceId: string | null, userAgent: string | null) {
@@ -564,6 +605,17 @@ function json(value: unknown, status = 200) {
     status,
     headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
   });
+}
+
+function withExternalCors(response: Response, request: Request) {
+  if (request.headers.get("origin") !== GITHUB_PAGES_ORIGIN) return response;
+  const headers = new Headers(response.headers);
+  headers.set("access-control-allow-origin", GITHUB_PAGES_ORIGIN);
+  headers.set("access-control-allow-headers", "content-type, x-qinglan-sync-code");
+  headers.set("access-control-allow-methods", "GET, POST, OPTIONS");
+  headers.set("access-control-max-age", "86400");
+  headers.append("vary", "Origin");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
 class HttpError extends Error {

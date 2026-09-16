@@ -27,6 +27,12 @@
 
 生产站点地址：<https://qinglan-ledger.kexiangqi15.chatgpt.site>
 
+### GitHub Pages 访问与同步
+
+仓库包含 GitHub Actions 发布流程，Pages 地址为 `https://kexiangqi15-glitch.github.io/financial-management/`。Pages 只托管公开前端代码；账本、附件、D1 数据库和任何密钥都不提交到 GitHub。
+
+Pages 与原生产站点使用同一份 D1/R2 数据。首次使用前，请在原站点打开“设置 → 账号与云同步 → GitHub Pages 同步码 → 生成同步码”，复制该 48 位同步码，再在 Pages 首屏输入。同步码是高熵账本密码，只保存在各设备浏览器本地，切勿分享。
+
 ## 同步与冲突规则
 
 每条数据独立保存 `entityType + recordId + clock + deviceId`：
@@ -106,7 +112,7 @@ pnpm run build
 }
 ```
 
-构建会把配置与 `drizzle/` 迁移复制到 `dist/.openai/`。发布新版本时，Sites 为 Worker 绑定 D1/R2、注入服务端 `OPENAI_API_KEY` 并应用迁移。此同步和 AI 实现依赖 Sites 的服务端 Worker 与身份头；若改部署到纯静态 GitHub Pages、Netlify 或 Vercel 静态托管，页面仍可离线使用，但必须另行提供兼容的身份代理、`/api/sync` 和 `/api/ai/analyze` Worker，不能把身份头或 OpenAI 密钥放到客户端。
+构建会把配置与 `drizzle/` 迁移复制到 `dist/.openai/`。发布新版本时，Sites 为 Worker 绑定 D1/R2、注入服务端 `OPENAI_API_KEY` 并应用迁移。GitHub Pages 发布版本通过跨域同步码连接该 Worker，身份头和 OpenAI 密钥仍完全留在服务端。若改部署到其他静态托管，必须在 Worker 的 CORS 白名单中显式加入该站点来源，不能把身份头或 OpenAI 密钥放到客户端。
 
 ## 数据备份
 

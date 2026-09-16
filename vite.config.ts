@@ -29,6 +29,7 @@ export default defineConfig(async ({ mode }) => {
     plugins: [react(), sites(), ...deploymentPlugins, stripServerSecrets()],
     resolve: { alias: { "@": fileURLToPath(new URL(".", import.meta.url)) } },
     build: { target: "es2022", sourcemap: true },
+    base: mode === "github-pages" ? "/financial-management/" : "/",
     server: { port: 5173 },
   };
 });

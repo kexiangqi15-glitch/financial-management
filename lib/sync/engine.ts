@@ -16,6 +16,7 @@ import {
   sanitizeForCloud,
   type CloudEnvelope,
 } from "./core";
+import { cloudApiUrl, cloudHeaders } from "../cloud-api";
 
 export type SyncStatus = "offline" | "syncing" | "success" | "error";
 
@@ -54,7 +55,7 @@ interface SyncEngineOptions {
 type AttachmentCloudData = Omit<AttachmentRecord, "blob"> & { blobVersion: number };
 type PreparedQueueItem = { item: SyncQueueItem; candidate: CloudEnvelope };
 
-const API_URL = "/api/sync";
+const API_URL = cloudApiUrl("/api/sync");
 const PUSH_BATCH_SIZE = 25;
 
 export class D1SyncEngine {
@@ -283,8 +284,9 @@ export class D1SyncEngine {
 
   private async downloadAttachment(recordId: string, data: AttachmentCloudData, clock: number): Promise<AttachmentRecord> {
     const response = await this.fetcher(`${API_URL}/attachments/${encodeURIComponent(recordId)}?clock=${clock}`, {
-      credentials: "same-origin",
+      credentials: "omit",
       cache: "no-store",
+      headers: cloudHeaders(),
     });
     if (!response.ok) throw await responseError(response);
     const blob = await response.blob();
@@ -294,9 +296,9 @@ export class D1SyncEngine {
   private async request(push: CloudEnvelope[], sinceVersion: number): Promise<SyncResponse> {
     const response = await this.fetcher(API_URL, {
       method: "POST",
-      credentials: "same-origin",
+      credentials: "omit",
       cache: "no-store",
-      headers: { "content-type": "application/json" },
+      headers: cloudHeaders({ "content-type": "application/json" }),
       body: JSON.stringify({ deviceId: this.deviceId, sinceVersion, push }),
     });
     if (!response.ok) throw await responseError(response);

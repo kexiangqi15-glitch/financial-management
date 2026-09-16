@@ -24,6 +24,7 @@ import {
 } from "@/lib/salary";
 import { SyncStatusGlyph, useCloudSync } from "./CloudSyncProvider";
 import { PlanningView } from "./PlanningView";
+import { cloudApiUrl, cloudHeaders } from "@/lib/cloud-api";
 
 type View = "home" | "transactions" | "add" | "budget" | "salary" | "installments" | "planning" | "calendar" | "analytics" | "accounts" | "settings";
 const TODAY = toLocalDate(new Date());
@@ -60,7 +61,7 @@ export function LedgerApp() {
     const saved = localStorage.getItem("qinglan-theme") as "light" | "dark" | null;
     if (saved) setTheme(saved);
     initializeDatabase().then(refresh).finally(() => setLoading(false));
-    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => undefined);
   }, [refresh]);
   useEffect(() => { window.addEventListener("qinglan:data-changed", refresh); return () => window.removeEventListener("qinglan:data-changed", refresh); }, [refresh]);
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem("qinglan-theme", theme); }, [theme]);
@@ -389,10 +390,10 @@ function AnalyticsView({ data, setToast }: { data: LedgerSnapshot; setToast: (me
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), 60_000);
     try {
-      const response = await fetch("/api/ai/analyze", {
+      const response = await fetch(cloudApiUrl("/api/ai/analyze"), {
         method: "POST",
-        credentials: "same-origin",
-        headers: { "content-type": "application/json" },
+        credentials: "omit",
+        headers: cloudHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ snapshot: buildAiAnalysisInput(data, monthPrefix, TODAY) }),
         signal: controller.signal,
       });
@@ -487,7 +488,7 @@ function AccountsView({ data, metrics: m, onRefresh, setToast }: { data: LedgerS
 
 function SettingsView({ data, theme, setTheme, onRefresh, setToast }: { data: LedgerSnapshot; theme: string; setTheme: (t: "light" | "dark") => void; onRefresh: () => Promise<void>; setToast: (s: string) => void }) {
   const cloud = useCloudSync();
-  const [clearText, setClearText] = useState(""); const [importInfo, setImportInfo] = useState<{ text: string; accounts: number; transactions: number } | null>(null);
+  const [clearText, setClearText] = useState(""); const [importInfo, setImportInfo] = useState<{ text: string; accounts: number; transactions: number } | null>(null); const [githubCode, setGithubCode] = useState("");
   const [csvInfo, setCsvInfo] = useState<{ fileName: string; preview: ReturnType<typeof previewTransactionCsv> } | null>(null);
   const exportJson = async () => downloadText(`青蓝账本-${TODAY}.json`, await exportBackup(), "application/json");
   const previewImport = async (file?: File) => { if (!file) return; const text = await file.text(); try { const value = JSON.parse(text); if (![1, 2].includes(value.schemaVersion) || !Array.isArray(value.accounts) || !Array.isArray(value.transactions)) throw new Error(); setImportInfo({ text, accounts: value.accounts.length, transactions: value.transactions.length }); } catch { setToast("备份文件格式无效"); } };
@@ -571,8 +572,9 @@ function SettingsView({ data, theme, setTheme, onRefresh, setToast }: { data: Le
   };
   const queueBudget = async () => { await queueLocalChange("budgets", "main"); await onRefresh(); };
   const lastSync = cloud.state.lastSyncedAt ? new Date(cloud.state.lastSyncedAt).toLocaleString("zh-CN") : "尚未完成";
+  const generateGitHubCode = async () => { try { const code = await cloud.createGitHubSyncCode(); setGithubCode(code); setToast("同步码已生成，请复制保存"); } catch (reason) { setToast(reason instanceof Error ? reason.message : "生成同步码失败"); } };
   return <div className="settings-grid">
-    <section className="settings-section wide cloud-account-section"><h2>账号与云同步</h2>{cloud.configured && cloud.user ? <div className="cloud-account"><div className="cloud-profile">{cloud.user.photoURL ? <img src={cloud.user.photoURL} alt="账号头像" /> : <div className="profile-fallback">青</div>}<div><strong>{cloud.user.displayName || "统一账号用户"}</strong><span>{cloud.user.email}</span><small>最后同步：{lastSync}</small></div></div><div className="cloud-controls"><SyncStatusGlyph /><button onClick={() => void cloud.syncNow()}><RefreshCw />立即同步</button><button className="danger" onClick={() => void cloud.logout()}><LogOut />退出登录</button></div></div> : <div className="cloud-needed"><ShieldCheck /><div><strong>{cloud.configured ? "正在连接统一账号" : "当前为本地安全模式"}</strong><p>{cloud.configured ? "连接完成后会自动迁移本机旧账，并开始手机、电脑之间的增量同步。" : "云数据库暂时不可用；账目仍完整保存在 IndexedDB，恢复后会自动补传。"}</p></div></div>}</section>
+    <section className="settings-section wide cloud-account-section"><h2>账号与云同步</h2>{cloud.configured && cloud.user ? <div className="cloud-account"><div className="cloud-profile">{cloud.user.photoURL ? <img src={cloud.user.photoURL} alt="账号头像" /> : <div className="profile-fallback">青</div>}<div><strong>{cloud.externalMode ? "GitHub Pages 同步账本" : cloud.user.displayName || "统一账号用户"}</strong><span>{cloud.externalMode ? "已通过同步码连接" : cloud.user.email}</span><small>最后同步：{lastSync}</small></div></div><div className="cloud-controls"><SyncStatusGlyph /><button onClick={() => void cloud.syncNow()}><RefreshCw />立即同步</button><button className="danger" onClick={() => void cloud.logout()}>{cloud.externalMode ? "断开本机" : "退出登录"}</button></div></div> : <div className="cloud-needed"><ShieldCheck /><div><strong>{cloud.configured ? "正在连接统一账号" : "当前为本地安全模式"}</strong><p>{cloud.configured ? "连接完成后会自动迁移本机旧账，并开始手机、电脑之间的增量同步。" : "云数据库暂时不可用；账目仍完整保存在 IndexedDB，恢复后会自动补传。"}</p></div></div>}{!cloud.externalMode && cloud.user && <div className="github-sync-code"><div><strong>GitHub Pages 同步码</strong><p>在 GitHub Pages 首次打开时输入；它相当于账本密码，请勿分享。</p></div><button onClick={() => void generateGitHubCode()}>{githubCode ? "重新生成" : "生成同步码"}</button>{githubCode && <code>{githubCode}</code>}</div>}</section>
     <section className="settings-section"><h2>预算与安全线</h2><SettingRow label="安全线范围" hint="决定哪些近期分期计入锁定资金"><select value={data.budget.safetyMode} onChange={async (e) => { await db.budgets.update("main", { safetyMode: e.target.value as typeof data.budget.safetyMode }); await queueBudget(); }}><option value="30d">未来30天</option><option value="60d">未来60天</option><option value="school">计算到开学</option><option value="custom">自定义金额</option></select></SettingRow><SettingRow label="每周结余" hint="决定结余是否滚入下周"><select value={data.budget.rolloverMode} onChange={async (e) => { await db.budgets.update("main", { rolloverMode: e.target.value as "rollover" | "reset" }); await queueBudget(); }}><option value="reset">每周清零</option><option value="rollover">结余滚存</option></select></SettingRow><SettingRow label="开学日期" hint="用于安全线和未来预测"><input type="date" value={data.budget.schoolDate} onChange={async (e) => { await db.budgets.update("main", { schoolDate: e.target.value as LocalDate }); await queueBudget(); }} /></SettingRow></section>
     <section className="settings-section"><h2>显示与隐私</h2><SettingRow label="界面主题" hint="登录后会同步到所有设备"><div className="theme-toggle"><button className={theme === "light" ? "active" : ""} onClick={() => setTheme("light")}><Sun />浅色</button><button className={theme === "dark" ? "active" : ""} onClick={() => setTheme("dark")}><Moon />深色</button></div></SettingRow><SettingRow label="本地缓存" hint="离线时仍可读写，联网后自动补传"><span className="local-badge"><ShieldCheck />IndexedDB 已启用</span></SettingRow></section>
     <DataSecurityCenter />
@@ -586,7 +588,7 @@ function DataSecurityCenter() {
   useEffect(() => {
     if (!cloud.user || !cloud.online) return;
     let active = true;
-    void fetch("/api/sync/security", { credentials: "same-origin", cache: "no-store" })
+    void fetch(cloudApiUrl("/api/sync/security"), { credentials: "omit", cache: "no-store", headers: cloudHeaders() })
       .then(async (response) => response.ok ? response.json() : null)
       .then((value) => { if (active && value) setOverview(value); })
       .catch(() => undefined);

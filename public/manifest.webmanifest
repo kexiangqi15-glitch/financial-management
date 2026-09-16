@@ -3,13 +3,12 @@
   "short_name": "青蓝账本",
   "description": "看清现金流，放心花每一笔钱",
   "lang": "zh-CN",
-  "start_url": "/",
+  "start_url": "./",
   "display": "standalone",
   "background_color": "#e9f6f7",
   "theme_color": "#0b6675",
   "icons": [
-    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
-    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+    { "src": "./icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
   ]
 }
-

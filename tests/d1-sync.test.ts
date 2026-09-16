@@ -63,5 +63,6 @@ describe("D1 跨设备增量同步", () => {
     expect((await db.accounts.get("acc-lqt"))?.openingBalanceCents).toBe(135305);
     expect((cloud.data as { openingBalanceCents: number }).openingBalanceCents).toBe(135305);
     expect(await db.syncQueue.count()).toBe(0);
+    expect(vi.mocked(fetcher).mock.calls.every(([, init]) => init?.credentials === "same-origin")).toBe(true);
   });
 });

@@ -31,7 +31,9 @@
 
 仓库包含 GitHub Actions 发布流程，Pages 地址为 `https://kexiangqi15-glitch.github.io/financial-management/`。Pages 只托管公开前端代码；账本、附件、D1 数据库和任何密钥都不提交到 GitHub。
 
-Pages 与原生产站点使用同一份 D1/R2 数据。首次使用前，请在原站点打开“设置 → 账号与云同步 → GitHub Pages 同步码 → 生成同步码”，复制该 48 位同步码，再在 Pages 首屏输入。同步码是高熵账本密码，只保存在各设备浏览器本地，切勿分享。
+Pages 与原生产站点使用同一份 D1/R2 数据。首次使用前，请在原站点打开“设置 → 账号与云同步 → GitHub Pages 同步码 → 生成 48 位同步码”，点击“复制同步码”，再在 Pages 首屏输入。输入后自动连接，无需刷新；原站点刷新后仍可查看本机保存的码。同步码是高熵账本密码，只保存在各设备浏览器本地，切勿分享。“生成另一同步码”不会使已连接设备上的旧码失效。
+
+原站点 API 必须使用 `credentials: same-origin` 保持统一账号登录；Pages 使用 `credentials: omit` 与 `x-qinglan-sync-code`，不依赖第三方 Cookie。若旧站反复回到登录页，先强制刷新（Windows：Ctrl+Shift+R），不要清除站点数据或 IndexedDB。服务器只保存同步码的哈希，并将其映射到原账户，不另建或搬空账本。Pages 前端可离线记账，但在线同步仍依赖原 Worker 域名的可达性，不能保证所有国内网络均能访问。
 
 ## 同步与冲突规则
 

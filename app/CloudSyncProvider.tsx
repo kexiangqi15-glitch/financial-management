@@ -43,6 +43,7 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<SyncEngineState>(initialState);
   const [engine, setEngine] = useState<D1SyncEngine | null>(null);
   const [externalCode, setExternalCode] = useState(() => getExternalSyncCode());
+  const externalSessionCode = isExternalCloudClient ? externalCode : "";
 
   useEffect(() => {
     const update = () => setOnline(navigator.onLine);
@@ -52,9 +53,15 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
       window.removeEventListener("online", update);
       window.removeEventListener("offline", update);
     };
-  }, [externalCode]);
+  }, []);
 
   useEffect(() => {
+    if (isExternalCloudClient && !externalSessionCode) {
+      setAuthRequired(true);
+      setEngine(null);
+      setState({ status: navigator.onLine ? "error" : "offline", pendingCount: 0 });
+      return;
+    }
     let active = true;
     let created: D1SyncEngine | undefined;
     void initializeDatabase().then(async () => {
@@ -88,7 +95,7 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
       });
     });
     return () => { active = false; created?.stop(); };
-  }, []);
+  }, [externalSessionCode]);
 
   const login = useCallback(async () => {
     if (isExternalCloudClient) return;
@@ -143,7 +150,7 @@ function LoginScreen({ login, error, online, external, onExternalCode }: { login
     setBusy(true);
     try { await login(); } finally { setBusy(false); }
   };
-  if (external) return <main className="login-screen"><section className="login-card"><div className="login-brand"><div className="brand-mark">青</div><div><h1>青蓝账本</h1><p>GitHub Pages 安全同步</p></div></div><div className="login-visual"><Cloud /><span>本机 IndexedDB</span><i /><span>D1 云数据库</span></div><h2>输入你的同步码</h2><p>请先在原青蓝账本站点的“设置 → 账号与云同步”生成同步码。它相当于账本密码，请勿发给他人。</p><input className="sync-code-input" value={code} onChange={(event) => setCode(event.target.value.replace(/\s/g, ""))} placeholder="粘贴 48 位同步码" autoCapitalize="none" autoCorrect="off" spellCheck={false} /><button className="google-login" disabled={!online || code.length < 32} onClick={() => onExternalCode(code)}><LogIn />{online ? "连接我的账本" : "离线，联网后可连接"}</button>{error && <p className="login-error">{error}</p>}<div className="login-security"><ShieldCheck /><span>同步码仅保存在本机浏览器；账目仍可在断网时继续记录。</span></div></section></main>;
+  if (external) return <main className="login-screen"><section className="login-card"><div className="login-brand"><div className="brand-mark">青</div><div><h1>青蓝账本</h1><p>GitHub Pages 安全同步</p></div></div><div className="login-visual"><Cloud /><span>本机 IndexedDB</span><i /><span>D1 云数据库</span></div><h2>输入你的同步码</h2><p>请先在原青蓝账本站点的“设置 → 账号与云同步”生成同步码。它相当于账本密码，请勿发给他人。</p><input className="sync-code-input" value={code} onChange={(event) => setCode(event.target.value.replace(/\s/g, "").toLowerCase())} placeholder="粘贴 48 位同步码" autoCapitalize="none" autoCorrect="off" spellCheck={false} /><button className="google-login" disabled={!online || !/^[a-f0-9]{48}$/.test(code)} onClick={() => onExternalCode(code)}><LogIn />{online ? "连接我的账本" : "离线，联网后可连接"}</button>{error && <p className="login-error">{error}</p>}<div className="login-security"><ShieldCheck /><span>同步码仅保存在本机浏览器；账目仍可在断网时继续记录。</span></div></section></main>;
   return <main className="login-screen"><section className="login-card"><div className="login-brand"><div className="brand-mark">青</div><div><h1>青蓝账本</h1><p>同一账号，随时接着记</p></div></div><div className="login-visual"><Cloud /><span>本机 IndexedDB</span><i /><span>D1 云数据库</span></div><h2>登录你的统一账号</h2><p>登录后会把旧账本安全迁移到云端，并在手机、电脑和平板之间自动增量同步。</p><button className="google-login" disabled={busy || !online} onClick={run}><LogIn />{busy ? "正在跳转…" : online ? "使用统一账号登录" : "离线，联网后可登录"}</button>{error && <p className="login-error">{error}</p>}<div className="login-security"><ShieldCheck /><span>账号身份由站点平台校验；云端按账号隔离，本机仍可离线记账。</span></div></section></main>;
 }
 

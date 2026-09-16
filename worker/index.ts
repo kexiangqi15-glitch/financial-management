@@ -369,7 +369,7 @@ async function downloadAttachment(request: Request, db: D1Database, bucket: R2Bu
 }
 
 async function authenticatedIdentity(request: Request, env: Env): Promise<Identity> {
-  const syncCode = request.headers.get("x-qinglan-sync-code")?.trim();
+  const syncCode = request.headers.get("x-qinglan-sync-code")?.trim().toLowerCase();
   if (syncCode) {
     if (!env.DB) throw new HttpError(503, "云数据库尚未绑定，请稍后重试");
     validateExternalSyncCode(syncCode);
@@ -399,16 +399,19 @@ async function platformIdentity(request: Request, env: Env): Promise<Identity> {
 
 async function createExternalLink(request: Request, db: D1Database, identity: Identity) {
   const body = await readJsonBody(request);
-  const code = requiredString(body.code, "同步码", 128).trim();
+  const code = requiredString(body.code, "同步码", 128).trim().toLowerCase();
   validateExternalSyncCode(code);
   await touchUser(db, identity, null, request.headers.get("user-agent"));
   const now = new Date().toISOString();
   const codeHash = await sha256(`qinglan-external-link:${code}`);
-  await db.prepare(`
+  const link = await db.prepare(`
     INSERT INTO sync_external_links (code_hash, owner_key, created_at, last_used_at, revoked_at)
     VALUES (?, ?, ?, ?, NULL)
-    ON CONFLICT(code_hash) DO UPDATE SET owner_key = excluded.owner_key, last_used_at = excluded.last_used_at, revoked_at = NULL
-  `).bind(codeHash, identity.ownerKey, now, now).run();
+    ON CONFLICT(code_hash) DO UPDATE SET last_used_at = excluded.last_used_at
+    WHERE sync_external_links.owner_key = excluded.owner_key AND sync_external_links.revoked_at IS NULL
+    RETURNING owner_key
+  `).bind(codeHash, identity.ownerKey, now, now).first<{ owner_key: string }>();
+  if (!link) throw new HttpError(409, "同步码已被使用，请重新生成");
   return json({ linked: true });
 }
 
@@ -418,14 +421,19 @@ function validateExternalSyncCode(code: string) {
 
 async function touchUser(db: D1Database, identity: Identity, deviceId: string | null, userAgent: string | null) {
   const now = new Date().toISOString();
-  await db.prepare(`
+  if (identity.external) {
+    // A sync code aliases the original owner; never replace their email or name.
+    await db.prepare("UPDATE sync_users SET last_seen_at = ? WHERE owner_key = ?").bind(now, identity.ownerKey).run();
+  } else {
+    await db.prepare(`
     INSERT INTO sync_users (owner_key, email, display_name, created_at, last_seen_at)
     VALUES (?, ?, ?, ?, ?)
     ON CONFLICT (owner_key) DO UPDATE SET
       email = excluded.email,
       display_name = COALESCE(excluded.display_name, sync_users.display_name),
       last_seen_at = excluded.last_seen_at
-  `).bind(identity.ownerKey, identity.email, identity.displayName, now, now).run();
+    `).bind(identity.ownerKey, identity.email, identity.displayName, now, now).run();
+  }
   if (deviceId) {
     await db.prepare(`
       INSERT INTO sync_devices (owner_key, device_id, user_agent, last_seen_at)

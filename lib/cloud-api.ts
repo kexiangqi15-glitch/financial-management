@@ -6,6 +6,11 @@ const configuredOrigin = (import.meta.env.VITE_CLOUD_API_ORIGIN ?? "").trim().re
  */
 export const isExternalCloudClient = configuredOrigin.length > 0;
 
+/** Preserve the Site's session cookie, but authenticate cross-origin Pages only with its sync code. */
+export function cloudCredentials(): RequestCredentials {
+  return isExternalCloudClient ? "omit" : "same-origin";
+}
+
 export function cloudApiUrl(path: string) {
   return configuredOrigin ? `${configuredOrigin}${path}` : path;
 }
@@ -18,7 +23,7 @@ export function getExternalSyncCode() {
 }
 
 export function saveExternalSyncCode(code: string) {
-  localStorage.setItem(SYNC_CODE_KEY, code.trim());
+  localStorage.setItem(SYNC_CODE_KEY, code.trim().toLowerCase());
 }
 
 export function clearExternalSyncCode() {

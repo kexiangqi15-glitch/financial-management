@@ -16,7 +16,7 @@ import {
   sanitizeForCloud,
   type CloudEnvelope,
 } from "./core";
-import { cloudApiUrl, cloudHeaders } from "../cloud-api";
+import { cloudApiUrl, cloudCredentials, cloudHeaders, isExternalCloudClient } from "../cloud-api";
 
 export type SyncStatus = "offline" | "syncing" | "success" | "error";
 
@@ -284,7 +284,7 @@ export class D1SyncEngine {
 
   private async downloadAttachment(recordId: string, data: AttachmentCloudData, clock: number): Promise<AttachmentRecord> {
     const response = await this.fetcher(`${API_URL}/attachments/${encodeURIComponent(recordId)}?clock=${clock}`, {
-      credentials: "omit",
+      credentials: cloudCredentials(),
       cache: "no-store",
       headers: cloudHeaders(),
     });
@@ -296,7 +296,7 @@ export class D1SyncEngine {
   private async request(push: CloudEnvelope[], sinceVersion: number): Promise<SyncResponse> {
     const response = await this.fetcher(API_URL, {
       method: "POST",
-      credentials: "omit",
+      credentials: cloudCredentials(),
       cache: "no-store",
       headers: cloudHeaders({ "content-type": "application/json" }),
       body: JSON.stringify({ deviceId: this.deviceId, sinceVersion, push }),
@@ -376,7 +376,7 @@ export async function readCachedProfile() {
 
 function readableSyncError(reason: unknown) {
   if (reason instanceof CloudSyncError) {
-    if (reason.status === 401) return "统一账号登录已失效，请重新登录";
+    if (reason.status === 401) return isExternalCloudClient ? reason.message : "统一账号登录已失效，请重新登录";
     if (reason.status === 503) return "云数据库正在配置，账目已安全保存在本机";
   }
   return errorMessage(reason);

@@ -73,7 +73,13 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
       await created.start();
     }).catch((reason: unknown) => {
       if (!active) return;
-      if (reason instanceof CloudSyncError && reason.status === 401) setAuthRequired(true);
+      if (reason instanceof CloudSyncError && reason.status === 401) {
+        setAuthRequired(true);
+        if (isExternalCloudClient && !getExternalSyncCode()) {
+          setState({ status: navigator.onLine ? "error" : "offline", pendingCount: 0, error: "请输入同步码以连接已有账本" });
+          return;
+        }
+      }
       if (reason instanceof CloudSyncError && reason.status === 503) setConfigured(false);
       setState({
         status: navigator.onLine ? "error" : "offline",

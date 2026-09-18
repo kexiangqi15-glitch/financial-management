@@ -1,4 +1,4 @@
-const CACHE = "qinglan-v7-auth-fix";
+const CACHE = "qinglan-v8-mobile-layout";
 const BASE = new URL(self.registration.scope).pathname.replace(/\/$/, "");
 const CORE = [`${BASE}/`, `${BASE}/manifest.webmanifest`, `${BASE}/icon-192.png`, `${BASE}/icon-512.png`];
 self.addEventListener("install", (event) => event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(CORE)).then(() => self.skipWaiting())));
